@@ -15,7 +15,7 @@ void initSequentialIndex(uint32_t* index) {
 }
 
 void shuffleIndex(uint32_t* index) {
-    std::random_device rd;
+    std::random_device rd; //setting up random number generator
     std::mt19937 gen(rd());
 
     std::shuffle(index, index + SIZE, gen);
