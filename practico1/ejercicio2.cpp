@@ -4,6 +4,19 @@
 
 using namespace std;
 
+
+void inicializarMatriz(float* matrix, int total) {
+    for (int i = 0; i < total; i++)
+        matrix[i] = 2.0f;
+    
+}
+
+void inicializarMatrizCeros(float* matrix, int total) {
+     for (int i = 0; i < total; i++) {
+        matrix[i] = 0.0f;
+    }
+}
+
 void matrix_mult(float *A, float *B, float *C, int N, int BS) {
     int i,j,k,ii,jj,kk;
 
@@ -13,9 +26,9 @@ void matrix_mult(float *A, float *B, float *C, int N, int BS) {
         for (jj = 0; jj < N; jj += BS)
             for (kk = 0; kk < N; kk += BS)
 
-                for (i = ii; i < min(ii + BS, N); i++)
-                    for (j = jj; j < min(jj + BS, N); j++)
-                        for (k = kk; k < min(kk + BS, N); k++)
+                for (i = ii; i < ii+BS; i++)
+                    for (j = jj; j < jj+BS; j++)
+                        for (k = kk; k < kk+BS; k++)
                             C[i*N+j] += A[i*N+k] * B[k*N+j];
 
     auto end = chrono::high_resolution_clock::now();
@@ -25,21 +38,23 @@ void matrix_mult(float *A, float *B, float *C, int N, int BS) {
 
 int main() {
     //cout << sizeof(float) << std::endl;
-    //64 MB = 64 × 1024 × 1024 bytes (LLC) 2^26 -> (2^2) * 2^13 ¨* 2^13
-    const int DIM = (1 << 13); // 2^13 = 8192
-    const size_t TOTAL = static_cast<size_t>(DIM) * DIM;
+    //32 MB = 32 × 1024 × 1024 bytes (LLC) 2^25 -> (2^2) * 2^13 ¨* 2^13
+    const int DIM = (1 << 12); 
+    const int TOTAL = DIM * DIM;
 
-    float* matrixA = new float[TOTAL]();
-    float* matrixB = new float[TOTAL]();
-    float* matrixC = new float[TOTAL]();
-    
+    float* matrixA = new float[TOTAL];
+    float* matrixB = new float[TOTAL];
+    float* matrixC = new float[TOTAL];
     int BS = 32; // 2^5
+
+    inicializarMatriz(matrixA, TOTAL);
+    inicializarMatriz(matrixB, TOTAL);
+    inicializarMatrizCeros(matrixC, TOTAL);
+
+    cout << "Matrix dimension: " << DIM << "x" << DIM << endl;
+    cout << "Matrix multiplication with block size: " << BS << endl;
     matrix_mult(matrixA, matrixB, matrixC, DIM, BS);
     
-    // for (int BS = 32; BS < (1 << 13); BS *= 4 ) {
-    //     matrix_mult(matrixA, matrixB, matrixC, DIM, BS);
-    // }                  
-
     delete[] matrixA;
     delete[] matrixB;
     delete[] matrixC;
