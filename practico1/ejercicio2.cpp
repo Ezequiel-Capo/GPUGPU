@@ -1,9 +1,9 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <new>
 
 using namespace std;
-
 
 void inicializarMatriz(float* matrix, int total) {
     for (int i = 0; i < total; i++)
@@ -39,22 +39,24 @@ void matrix_mult(float *A, float *B, float *C, int N, int BS) {
 int main() {
     //cout << sizeof(float) << std::endl;
     //32 MB = 32 × 1024 × 1024 bytes (LLC) 2^25 -> (2^2) * 2^13 ¨* 2^13
-    const int DIM = (1 << 12); 
+    //16 MB = 16 × 1024 × 1024 bytes (LLC) 2^24 -> (2^2) * 2^12 ¨* 2^12
+    const int DIM = (1 << 12); // 2^12 = 4096
     const int TOTAL = DIM * DIM;
-
+    
     float* matrixA = new float[TOTAL];
     float* matrixB = new float[TOTAL];
     float* matrixC = new float[TOTAL];
-    int BS = 32; // 2^5
-
+    cout << "Matrix dimension: " << DIM << "x" << DIM << endl;
     inicializarMatriz(matrixA, TOTAL);
     inicializarMatriz(matrixB, TOTAL);
-    inicializarMatrizCeros(matrixC, TOTAL);
-
-    cout << "Matrix dimension: " << DIM << "x" << DIM << endl;
-    cout << "Matrix multiplication with block size: " << BS << endl;
-    matrix_mult(matrixA, matrixB, matrixC, DIM, BS);
     
+    for (int BS = 8; BS <= 512; BS *= 2) {
+        inicializarMatrizCeros(matrixC, TOTAL);
+        cout << "BS = " << BS << endl;
+        matrix_mult(matrixA, matrixB, matrixC, DIM, BS);
+    }
+    
+
     delete[] matrixA;
     delete[] matrixB;
     delete[] matrixC;
