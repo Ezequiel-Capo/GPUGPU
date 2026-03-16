@@ -17,6 +17,21 @@ void inicializarMatrizCeros(float* matrix, int total) {
     }
 }
 
+void matrix_mult_convencional(float *A, float *B, float *C, int N){
+    int i,j,k;
+
+    auto start = chrono::high_resolution_clock::now();
+
+    for (i = 0; i < N; i++)
+        for (k = 0; k < N; k++)
+            for (j = 0; j < N; j++)
+                C[i*N+j] += A[i*N+k] * B[k*N+j];
+
+    auto end = chrono::high_resolution_clock::now();
+    chrono::duration<double> elapsed = end - start;
+    cout << "Matrix multiplication time: " << elapsed.count() << " seconds" << endl;
+}
+
 void matrix_mult(float *A, float *B, float *C, int N, int BS) {
     int i,j,k,ii,jj,kk;
 
@@ -56,6 +71,10 @@ int main() {
         matrix_mult(matrixA, matrixB, matrixC, DIM, BS);
     }
     
+    inicializarMatrizCeros(matrixC, TOTAL);
+    cout << "Convencional" << endl;
+    matrix_mult_convencional(matrixA, matrixB, matrixC, DIM);
+
 
     delete[] matrixA;
     delete[] matrixB;
