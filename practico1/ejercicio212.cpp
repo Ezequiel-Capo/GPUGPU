@@ -53,9 +53,14 @@ void matrix_mult(float *A, float *B, float *C, int N, int BS) {
 
 int main() {
     //cout << sizeof(float) << std::endl;
-    //32 MB = 32 × 1024 × 1024 bytes (LLC) 2^25 -> (2^2) * 2^13 ¨* 2^13
-    //16 MB = 16 × 1024 × 1024 bytes (LLC) 2^24 -> (2^2) * 2^12 ¨* 2^12
-    const int DIM = (1 << 12); // 2^12 = 4096
+ 
+    cout << "CPU: AMD Ryzen 5 5600 G" << endl;
+    cout << "L1 Cache: 32 KB" << endl;
+    cout << "L2 Cache: 512 KB" << endl;
+    cout << "L3 Cache: 16 MB" << endl;
+    cout << "RAM: 16 GB" << endl;
+    cout << "Cores: 6, threads: 12" << endl;
+    const int DIM = (1 << 12); // 2^12 = 4096 -> 2^12 * 2^12 * 2^2 bytes = 2^26 (64) MB por matriz >> 16MB (2^24) L3 cache
     const int TOTAL = DIM * DIM;
     
     float* matrixA = new float[TOTAL];
