@@ -51,7 +51,7 @@ int main(int argc, char *argv[])
 	size = length * sizeof(int);//es int pero podría ser mas chico ya que es ascii de 256
 
 	// reservar memoria para el mensaje, host
-	h_message = malloc(size);
+	h_message = (int *)malloc(size);
 
 	// leo el archivo de la entrada
 	read_file(fname, h_message);
