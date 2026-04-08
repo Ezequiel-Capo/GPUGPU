@@ -36,11 +36,11 @@ __global__ void decrypt_kernel(int *d_message, int length)
 
 int main(int argc, char *argv[])
 {
-	int *h_message; //1 byte por caracter, 0-255
+	int *h_message; 
 	int *d_message;
 	unsigned int size;
 
-	const char * fname = "secreto.txt";
+	const char * fname = "secreto.txt"; 
 
 	if (argc < 2) printf("Debe ingresar el nombre del archivo\n");
 	else
@@ -48,7 +48,7 @@ int main(int argc, char *argv[])
 
 	int length = get_text_length(fname);
 
-	size = length * sizeof(int);//es int pero podría ser mas chico ya que es ascii de 256
+	size = length * sizeof(int);
 
 	// reservar memoria para el mensaje, host
 	h_message = (int *)malloc(size);
@@ -64,7 +64,7 @@ int main(int argc, char *argv[])
 
 
 	// lanzar el kernel para desencriptar el mensaje
-	dim3 block_s(128); //se toma rtx 2080ti, 1024threads por bloque
+	dim3 block_s(128); //se toma rtx 2080ti, 1024threads por bloque, tomó 128 threads por bloque
 	dim3 grid_s((length + block_s.x - 1) / block_s.x); //cantidad de bloques necesarios para procesar el mensaje, redondeo forzado hacia arriba
 
 	decrypt_kernel<<<grid_s, block_s>>>(d_message, length);
