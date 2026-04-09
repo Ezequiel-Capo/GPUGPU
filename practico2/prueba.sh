@@ -1,22 +1,39 @@
 #!/bin/bash
-#SBATCH --job-name=practico2_ej1
-#SBATCH --ntasks=1
-#SBATCH --mem=16G
-#SBATCH --time=00:05:00
+set -e
 
-#SBATCH --gres=gpu:n2080ti:1
-# para ejecutar en la gtx1060 ---> #SBATCH --gres=gpu:n1060:1
-# para ejecutar en la rtx2080ti ---> #SBATCH --gres=gpu:n2080ti:1
+printf "Casos de pruebas, ejecutnado\n"
+job_ej1=$(sbatch --parsable --output=ej1.out --error=ej1.err --open-mode=truncate lanzar.sh "./ej1" "secreto.txt")
 
-#SBATCH --partition=cursos
-#SBATCH --qos=gpgpu
 
-PATH=$PATH:/usr/local/cuda/bin
-LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+job_e3_1=$(sbatch --parsable --output=ej3_caso1.out --error=ej3_caso1.err   --open-mode=truncate lanzar.sh "./ej3" 8 8 8 8 1)
+job_e3_2=$(sbatch --parsable --output=ej3_caso2.out --error=ej3_caso2.err --open-mode=truncate lanzar.sh "./ej3" 1024 1024 32 32)
+job_e3_3=$(sbatch --parsable --output=ej3_caso3.out --error=ej3_caso3.err --open-mode=truncate lanzar.sh "./ej3" 2048 2048 32 32)
 
-# Compilar el código
-nvcc -O2 -o ej3 ej3.cu
+printf "Jobs enviados: ej1=%s, e3_1=%s, e3_2=%s, e3_3=%s\n" "$job_ej1" "$job_e3_1" "$job_e3_2" "$job_e3_3"
 
-$1 $2 $3 $4 $5 $6
+for jid in "$job_ej1" "$job_e3_1" "$job_e3_2" "$job_e3_3"; do
+	while squeue -h -j "$jid" | grep -q .; do
+		sleep 1
+	done
+done
 
-#sbatch lanzar.sh "./ej3" 200 200 32 32
+printf "Resultados de las pruebas\n"
+
+printf "Ejercicio 1)\n\n"
+cat ej1.out
+printf "\n"
+
+printf "Ejercicio 2)\n\n"
+#cat ej2.out
+printf "\n"
+
+printf "Ejercicio 3)\n\n"
+
+printf "E3-1) Prueba con tamaños Nx=8, Ny=8 para ver transposición correcta\n"
+cat ej3_caso1.out
+printf "\n"
+printf "E3-2) Prueba con tamaños Nx=1024, Ny=1024 y bloques de 32x32\n"
+cat ej3_caso2.out
+printf "\n"
+printf "E3-3) Prueba con tamaños Nx=2048, Ny=2048 y bloques de 32x32\n"
+cat ej3_caso3.out
