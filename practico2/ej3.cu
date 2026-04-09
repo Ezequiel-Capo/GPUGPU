@@ -12,23 +12,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-// Construir un kernel que reciba una matriz de enteros alojada en memoria global y devuelva la matriz
-// transpuesta. Reserve dos espacios de memoria distintos para las matrices de entrada y salida. En este
-// ejercicio el kernel no debe utilizar la memoria compartida (todas las lecturas y escrituras deben realizarse
-// en memoria global). La grilla debe ser bidimensional y los bloques tambi´en deben ser bidimensionales.
-
-// 1. Ejecute el kernel con un tama˜no de bloque de 32×32 y analice el patr´on de acceso a memoria global
-// de cada warp que se da en las lecturas y escrituras. Mida el tiempo de ejecuci´on del kernel.
-// 2. Modifique el tama˜no de bloque para reducir los accesos no-coalesced. Justifique adecuadamente la
-// elecci´on de tama˜no de bloque. Ejecute el kernel nuevamente y compare el tiempo de ejecuci´on con el
-// caso anterior.
-
-
-__device__ int modulo(int a, int b){
-	int r = a % b;
-	r = (r < 0) ? r + b : r;
-	return r;
-}
 
 
 __global__ void m_traspose_kernel(float *d_matriz_ini, float *d_matriz_res, int Nx, int Ny)
@@ -48,7 +31,7 @@ int main(int argc, char *argv[])
     int block_x = 32, block_y = 32;
     char v = 0;  // 0: no imprimir matrices, 1: imprimir
 
-    if (argc > 1) Nx = atoi(argv[1]);
+    if (argc > 1) Nx = atoi(argv[1]); //pasar string a int
     if (argc > 2) Ny = atoi(argv[2]);
     if (argc > 3) block_x = atoi(argv[3]);
     if (argc > 4) block_y = atoi(argv[4]);
