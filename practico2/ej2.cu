@@ -6,14 +6,13 @@
 __global__ void sumarSubmatriz1D(int* A, int n, int i1, int j1, int i2, int j2, int val) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
     int filas = i2 - i1 + 1;
-    int cols  = j2 - j1 + 1;
-    int total = filas * cols;
+    int columnas  = j2 - j1 + 1;
+    int total = filas * columnas;
 
     if (idx < total) {
-        int fila = idx / cols;
-        int col  = idx % cols;
+        int fila = idx / columnas;
+        int col  = idx % columnas;
 
         int i = i1 + fila;
         int j = j1 + col;
@@ -29,9 +28,9 @@ __global__ void sumarSubmatriz2D(int* A, int n,int i1, int j1, int i2, int j2, i
     int col  = blockIdx.x * blockDim.x + threadIdx.x;
 
     int filas = i2 - i1 + 1;
-    int cols  = j2 - j1 + 1;
+    int columnas  = j2 - j1 + 1;
 
-    if (fila < filas && col < cols) {
+    if (fila < filas && col < columnas) {
         int i = i1 + fila;
         int j = j1 + col;
 
@@ -71,7 +70,7 @@ int main(int argc, char *argv[]) {
     int* A = (int*)malloc(size);
 
     for (int i = 0; i < n * n; i++) {
-        A[i] = i;
+        A[i] = 1;
     }
 
     printf("Matriz original:\n");
