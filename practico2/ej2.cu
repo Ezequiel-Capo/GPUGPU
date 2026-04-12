@@ -89,8 +89,8 @@ int main(int argc, char *argv[]) {
     int cols  = j2 - j1 + 1;
     int total = filas * cols;
 
-    dim3 blockSize1D(bsize);
-    int gridSize1D = (total + blockSize1D - 1) / blockSize1D;
+    dim3 blockSize1D(bsize1);
+    int gridSize1D = (total + blockSize1D.x - 1) / blockSize1D.x;
 
     sumarSubmatriz1D<<<gridSize1D, blockSize1D>>>(
         A_d, n, i1, j1, i2, j2, val
