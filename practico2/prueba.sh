@@ -4,6 +4,7 @@ set -e
 printf "Casos de pruebas, ejecutnado\n"
 job_ej1=$(sbatch --parsable --output=ej1.out --error=ej1.err --open-mode=truncate lanzar.sh "./ej1" "secreto.txt")
 
+job_ej2=$(sbatch --parsable --output=ej2.out --error=ej2.err --open-mode=truncate lanzar.sh "./ej2" 10 1 1 4 4 10)
 
 job_e3_1=$(sbatch --parsable --output=ej3_caso1.out --error=ej3_caso1.err   --open-mode=truncate lanzar.sh "./ej3" 8 8 8 8 1)
 
@@ -17,9 +18,9 @@ job_e3_7=$(sbatch --parsable --output=ej3_caso7.out --error=ej3_caso7.err --open
 job_e3_8=$(sbatch --parsable --output=ej3_caso8.out --error=ej3_caso8.err --open-mode=truncate lanzar.sh "./ej3" 16384 16384 4 64)
 
 
-printf "Jobs enviados: ej1=%s, e3_1=%s, e3_2=%s, e3_3=%s, e3_4=%s, e3_5=%s, e3_6=%s, e3_7=%s, e3_8=%s\n" "$job_ej1" "$job_e3_1" "$job_e3_2" "$job_e3_3" "$job_e3_4" "$job_e3_5" "$job_e3_6" "$job_e3_7" "$job_e3_8"
+printf "Jobs enviados: ej1=%s, e3_1=%s, ej2=%s, e3_2=%s, e3_3=%s, e3_4=%s, e3_5=%s, e3_6=%s, e3_7=%s, e3_8=%s\n" "$job_ej1"  "$job_ej2" "$job_e3_1" "$job_e3_2" "$job_e3_3" "$job_e3_4" "$job_e3_5" "$job_e3_6" "$job_e3_7" "$job_e3_8"
 
-for jid in "$job_ej1" "$job_e3_1" "$job_e3_2" "$job_e3_3" "$job_e3_4" "$job_e3_5" "$job_e3_6" "$job_e3_7" "$job_e3_8"; do
+for jid in "$job_ej1" "$job_ej2" "$job_e3_1" "$job_e3_2" "$job_e3_3" "$job_e3_4" "$job_e3_5" "$job_e3_6" "$job_e3_7" "$job_e3_8"; do
 	while squeue -h -j "$jid" | grep -q .; do
 		sleep 1
 	done
@@ -32,7 +33,7 @@ cat ej1.out
 printf "\n"
 
 printf "Ejercicio 2)\n\n"
-#cat ej2.out
+cat ej2.out
 printf "\n"
 
 printf "Ejercicio 3)\n\n"
