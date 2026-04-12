@@ -57,6 +57,8 @@ int main(int argc, char *argv[]) {
     int i1 = 1, j1 = 1;
     int i2 = 4, j2 = 4;
     int val = 10;
+    int bsize1 = 256; // múltiplo de 32
+    int bsize2 = 256; // múltiplo de 32
 
     if (argc > 1) n = atoi(argv[1]); //pasar string a int
     if (argc > 2) i1 = atoi(argv[2]);
@@ -64,6 +66,8 @@ int main(int argc, char *argv[]) {
     if (argc > 4) i2 = atoi(argv[4]);
     if (argc > 5) j2 = atoi(argv[5]);
     if (argc > 6) val = atoi(argv[6]);
+    if (argc > 7) bsize1 = atoi(argv[7]);
+    if (argc > 8) bsize2 = atoi(argv[8]);
 
     int size = n * n * sizeof(int);
 
@@ -85,7 +89,7 @@ int main(int argc, char *argv[]) {
     int cols  = j2 - j1 + 1;
     int total = filas * cols;
 
-    int blockSize1D = 256; // múltiplo de 32
+    dim3 blockSize1D(bsize);
     int gridSize1D = (total + blockSize1D - 1) / blockSize1D;
 
     sumarSubmatriz1D<<<gridSize1D, blockSize1D>>>(
@@ -105,7 +109,7 @@ int main(int argc, char *argv[]) {
 
     cudaMemcpy(A_d, A, size, cudaMemcpyHostToDevice);
     
-    dim3 blockSize2D(32, 8); // 256 hilos (múltiplo de 32)
+    dim3 blockSize2D(bsize1, bsize2); // 256 hilos (múltiplo de 32)
 
     dim3 gridSize2D(
         (cols + blockSize2D.x - 1) / blockSize2D.x,
