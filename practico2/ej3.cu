@@ -16,8 +16,8 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 
 __global__ void m_traspose_kernel(float *d_matriz_ini, float *d_matriz_res, int Nx, int Ny)
 {
-    int idx_x = blockIdx.x * blockDim.x + threadIdx.x; // columna
-    int idx_y = blockIdx.y * blockDim.y + threadIdx.y; // fila
+    int idx_x = blockIdx.x * blockDim.x + threadIdx.x; //column_id
+    int idx_y = blockIdx.y * blockDim.y + threadIdx.y; //row_id
 
     if (idx_x < Nx && idx_y < Ny) {
         d_matriz_res[idx_x * Ny + idx_y] = d_matriz_ini[idx_y * Nx + idx_x];
@@ -62,20 +62,24 @@ int main(int argc, char *argv[])
 	dim3 block_s(block_x, block_y); //, size = x*y*4B (por letra fijo)
 	dim3 grid_s((Nx + block_s.x - 1) / block_s.x, (Ny + block_s.y - 1) / block_s.y); 
 
-    //para medir el tiempo de ejecucion del kernel
+    // Create CUDA events
     cudaEvent_t start, stop;
     CUDA_CHK(cudaEventCreate(&start));
     CUDA_CHK(cudaEventCreate(&stop));
-    CUDA_CHK(cudaEventRecord(start));
+
+    // Start measuring time
+    CUDA_CHK(cudaEventRecord(start, 0));
 
     m_traspose_kernel<<<grid_s, block_s>>>(d_matriz_ini, d_matriz_res, Nx, Ny);
     CUDA_CHK(cudaGetLastError());
 
-    CUDA_CHK(cudaEventRecord(stop));
+    // Stop measuring time and compute
+    CUDA_CHK(cudaEventRecord(stop, 0));
     CUDA_CHK(cudaEventSynchronize(stop));
-    float elapsed_ms = 0.0f;
-    CUDA_CHK(cudaEventElapsedTime(&elapsed_ms, start, stop));
-    printf("Tiempo de ejecucion del kernel: %.6f ms (%.3f us)\n", elapsed_ms, elapsed_ms * 1000.0f);
+    float milliseconds = 0.0f;
+    CUDA_CHK(cudaEventElapsedTime(&milliseconds, start, stop));
+    printf("Grid size: (%d, %d), Block size: (%d, %d)\n", grid_s.x, grid_s.y, block_s.x, block_s.y);
+    printf("Kernel took: %.6f ms\n", milliseconds);
     CUDA_CHK(cudaEventDestroy(start));
     CUDA_CHK(cudaEventDestroy(stop));
     //fin medicion tiempo
