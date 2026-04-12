@@ -52,14 +52,21 @@ void imprimirMatriz(int* A, int n) {
 }
 
 
-int main() {
+int main(int argc, char *argv[]) {
 
     int n = 6;
-    int size = n * n * sizeof(int);
-
     int i1 = 1, j1 = 1;
     int i2 = 4, j2 = 4;
     int val = 10;
+
+    if (argc > 1) n = atoi(argv[1]); //pasar string a int
+    if (argc > 2) i1 = atoi(argv[2]);
+    if (argc > 3) j1 = atoi(argv[3]);
+    if (argc > 4) i2 = atoi(argv[4]);
+    if (argc > 5) j2 = atoi(argv[5]);
+    if (argc > 6) val = atoi(argv[6]);
+
+    int size = n * n * sizeof(int);
 
     int* A = (int*)malloc(size);
 
@@ -94,7 +101,7 @@ int main() {
     imprimirMatriz(A, n);
 
     for (int i = 0; i < n * n; i++) {
-        A[i] = i;
+        A[i] = 1;
     }
 
     cudaMemcpy(A_d, A, size, cudaMemcpyHostToDevice);
