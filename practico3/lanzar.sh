@@ -15,6 +15,7 @@ PATH=$PATH:/usr/local/cuda/bin
 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
 
 nvcc -O2 -o ej1 ej1.cu
+nvcc -O2 -o ej2 ej2.cu
 
 $1 $2 $3 $4 $5 $6
 

@@ -14,29 +14,32 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-__global__ void m_traspose_kernel(float *d_matriz_ini, float *d_matriz_res, int N, int tile_dim)
+template<int TILE_PAD> //para no usar extern, tampoco es delito
+__global__ void m_traspose_kernel(float *d_matriz_ini, float *d_matriz_res, int N)
 {
-    // Padding fijo de 1 para evitar conflictos de bancos al transponer.
-    __shared__ float tile[TILE_DIM][TILE_DIM + 1];
-    (void)tile_dim;
+    __shared__ float tile[TILE_DIM][TILE_DIM + TILE_PAD];
 
-    int idx_x = blockIdx.x * blockDim.x + threadIdx.x; //column_id
-    int idx_y = blockIdx.y * blockDim.y + threadIdx.y; //row_id
+    int idx_x = blockIdx.x * blockDim.x + threadIdx.x; //column_id Bidx * N + tidx (las q son coalesced)
+    int idx_y = blockIdx.y * blockDim.y + threadIdx.y; //row_id Bidy * N + tidy
 
      // cargar desde global 
     if (idx_x < N && idx_y < N) {
-        tile[threadIdx.y][threadIdx.x] = d_matriz_ini[idx_y * N + idx_x];
+        tile[threadIdx.y][threadIdx.x] = d_matriz_ini[idx_y * N + idx_x]; // tile[y][x] = A[y][x]
+        //banco = (fila * ancho_fila + columna) % num_bancos
+
+        //tile[threadIdx.x][threadIdx.y] = d_matriz_ini[idx_x * N + idx_y];
+
     }
 
     __syncthreads(); //esperar a que todos los threads hayan cargado su elemento en shared
 
     // transponer índices de bloque
-    int x = blockIdx.y * TILE_DIM + threadIdx.x;
-    int y = blockIdx.x * TILE_DIM + threadIdx.y;
+    int x = blockIdx.y * TILE_DIM + threadIdx.x; // columna destino, 
+    int y = blockIdx.x * TILE_DIM + threadIdx.y; // fila destino
 
     // escribir desde shared 
     if (x < N && y < N) {
-        d_matriz_res[y * N + x] = tile[threadIdx.x][threadIdx.y];
+        d_matriz_res[y * N + x] = tile[threadIdx.x][threadIdx.y]; // A[y][x] = tile[x][y]
     }
 }
 
@@ -44,14 +47,16 @@ int main(int argc, char *argv[])
 {
     float times[11];
 
-
     int N = (1<<14);
     int block_x = 32, block_y = 32;
-    char tile_dim = 0;
-    if (argc > 1) tile_dim = atoi(argv[1]); //pasar string a int
-
-    printf("Tiles de tamaño: %d x %d\n", TILE_DIM, TILE_DIM + tile_dim);
     char v = 0;  // 0: no imprimir matrices, 1: imprimir
+    char tile_int = 0;
+    if (argc > 1) tile_int = atoi(argv[1]); //pasar string a int
+    if (argc > 2) N = atoi(argv[2]); //pasar string a int
+    if (argc > 3) v = atoi(argv[3]); //pasar string a int
+    const int tile_dim = TILE_DIM + tile_int; //ajustar tile_dim sumando el padding
+
+    printf("Tiles de tamaño: %d x %d\n", TILE_DIM, tile_dim);
 
     unsigned int size = N * N * sizeof(float);
     
@@ -67,11 +72,11 @@ int main(int argc, char *argv[])
     // Reservar memoria en device
     float *d_matriz_ini, *d_matriz_res;
 	// reservar memoria en la GPU
-	cudaMalloc((void **)&d_matriz_ini, size);
-	cudaMalloc((void **)&d_matriz_res, size);
+	CUDA_CHK(cudaMalloc((void **)&d_matriz_ini, size));
+	CUDA_CHK(cudaMalloc((void **)&d_matriz_res, size));
 
 	// copiar el de host a device
-	cudaMemcpy(d_matriz_ini, h_matriz_ini, size, cudaMemcpyHostToDevice);
+	CUDA_CHK(cudaMemcpy(d_matriz_ini, h_matriz_ini, size, cudaMemcpyHostToDevice));//cuda chk para verificar que la copia se realizó correctamente
 
     //total_threads = #blocks * #threads_per_block(32*32)
     //total_threads = x*y (matrix size)
@@ -87,7 +92,11 @@ int main(int argc, char *argv[])
         // Start measuring time
         CUDA_CHK(cudaEventRecord(start, 0));
 
-        m_traspose_kernel<<<grid_s, block_s>>>(d_matriz_ini, d_matriz_res, N, tile_dim);
+        if (tile_int == 0) 
+            m_traspose_kernel<0><<<grid_s, block_s>>>(d_matriz_ini, d_matriz_res, N);
+         else if (tile_int == 1) 
+            m_traspose_kernel<1><<<grid_s, block_s>>>(d_matriz_ini, d_matriz_res, N);
+        
         CUDA_CHK(cudaGetLastError());
 
         // Stop measuring time and compute
@@ -119,11 +128,11 @@ int main(int argc, char *argv[])
     //fin medicion tiempo
 
     // copiar el de device a host
-	cudaMemcpy(h_matriz_res, d_matriz_res, size, cudaMemcpyDeviceToHost);
+	CUDA_CHK(cudaMemcpy(h_matriz_res, d_matriz_res, size, cudaMemcpyDeviceToHost));
 
     //liberar mem gpu
-	cudaFree(d_matriz_ini);
-	cudaFree(d_matriz_res);
+	CUDA_CHK(cudaFree(d_matriz_ini));
+	CUDA_CHK(cudaFree(d_matriz_res));
 
     // despliego la matriz resultante
     if (v) {
