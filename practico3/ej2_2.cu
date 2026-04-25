@@ -16,19 +16,17 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 __inline__ __device__ int warpReduceSum(int val, unsigned mask) {
-    for (int offset = 16; offset > 0; offset /= 2) {
+    for (int offset = 16; offset > 0; offset /= 2) 
         val += __shfl_down_sync(mask, val, offset);
-    }
     return val;
 }
 
-__inline__ __device__ int warpReduceMax(int val, unsigned mask)
-{
+
+__inline__ __device__ int warpReduceMax(int val, unsigned mask){
     for (int offset = 16; offset > 0; offset /= 2){
         int other = __shfl_down_sync(mask, val, offset);
-        if (other > val) {
+        if (other > val) 
             val = other;
-        }
     }
     return val;
 }
@@ -39,24 +37,24 @@ __global__ void func_suma_arreglo(int *d_arreglo_ini, int *d_arreglo_res)
     int gid = blockIdx.x * blockDim.x + tid; 
 
     int val = d_arreglo_ini[gid];
+    unsigned mask = 0xFFFFFFFFu;
+    unsigned negsMask = __ballot_sync(mask, (val < 0));
+    //unsigned posMask = ~negsMask;
 
-    unsigned negsMask = __ballot_sync(0xFFFFFFFFu, (val < 0));
-    unsigned posMask = ~negsMask;
+    int negVal = 0;
+    if (val < 0)
+       negVal = val;
 
-    int negVal = val;
-    if (val >= 0) {
-        negVal = 0;
-    }
-    int negSum = warpReduceSum(negVal, negsMask);//todos los hilos llaman, uso 16 primeros, si son positivos no deben aportar
-    negSum = __shfl_sync(negsMask, negSum, 0);//__shfl_sync(unsigned mask, T var, int srcLane, int width=32);
+    int negSum = warpReduceSum(negVal, mask);
+    negSum = __shfl_sync(negsMask, negSum, 0);
 
-    int maxVal = warpReduceMax(val, posMask); //todos los hilos llaman, uso 16 primeros, si son negativos no deben aportar
-    maxVal = __shfl_sync(posMask, maxVal, 0);
+    int maxVal = warpReduceMax(val, mask); 
+    maxVal = __shfl_sync(negsMask, maxVal, 0);
 
     if (val < 0)
         d_arreglo_res[gid] = negSum + maxVal;
     else
-        d_arreglo_res[gid] = maxVal;
+        d_arreglo_res[gid] = val;
 }
 
 
@@ -64,7 +62,6 @@ int main(int argc, char *argv[])
 {
     srand((unsigned int)time(NULL));
 
-    float times[11];
     int N = (1<<14);
     int block = 32; //COMPLETAMENTE NECESARIO PARA LA SHARED
     int size = N * sizeof(int);
@@ -75,8 +72,6 @@ int main(int argc, char *argv[])
         N = atoi(argv[1]);
     if (argc > 2) 
         v = atoi(argv[2]);
-    if (argc > 3) //NO ALTERAR
-        block = atoi(argv[3]);
     if (argc > 4) 
         a = atoi(argv[4]);
     if (argc > 5) 
@@ -85,7 +80,6 @@ int main(int argc, char *argv[])
     // Reservar memoria en host
     int * arreglo_ini = (int *)malloc(size);
     int * arreglo_res = (int *)malloc(size);
-
 
     for (int i = 0; i <  N; i++) {
         int signo = (rand() % 2) ? 1 : -1;
@@ -106,45 +100,11 @@ int main(int argc, char *argv[])
 	dim3 block_s(block); //, size = x*y*4B (por letra fijo)
 	dim3 grid_s((N + block - 1) / block); //si N siempre multiplo no importa block_s-1
 
-    // Create CUDA events
-    cudaEvent_t start, stop;
-    CUDA_CHK(cudaEventCreate(&start));
-    CUDA_CHK(cudaEventCreate(&stop));
-
-    for (int i = 0; i < 11; i++) {
-        // Start measuring time
-        CUDA_CHK(cudaEventRecord(start, 0));
-
+    for (int i = 0; i < 10; i++) {
         func_suma_arreglo<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
         CUDA_CHK(cudaGetLastError());
-
-        // Stop measuring time and compute
-        CUDA_CHK(cudaEventRecord(stop, 0));
-        CUDA_CHK(cudaEventSynchronize(stop));
-        CUDA_CHK(cudaEventElapsedTime(&times[i], start, stop));
-        printf("Run %d took: %.6f ms\n", i + 1, times[i]);
+        CUDA_CHK(cudaDeviceSynchronize());
     }
-
-    float mean = 0.0f;
-    for (int i = 1; i < 11; i++) { //elimino warm up
-        mean += times[i];
-    }
-    mean /= 10.0f;
-
-    float variance = 0.0f;
-    for (int i = 1; i < 11; i++) { //elimino warm up
-        float diff = times[i] - mean;
-        variance += diff * diff;
-    }
-    variance /= 10.0f;
-    float stddev = sqrtf(variance);
-
-    printf("Grid size: (%u), Block size: (%u)\n", grid_s.x, block_s.x);
-    printf("Tiempo promedio (10 runs): %.6f ms\n", mean);
-    printf("Desviación estándar: %.6f ms\n", stddev);
-    CUDA_CHK(cudaEventDestroy(start));
-    CUDA_CHK(cudaEventDestroy(stop));
-    //fin medicion tiempo
 
     // copiar el de device a host
 	CUDA_CHK(cudaMemcpy(arreglo_res, d_arreglo_res, size, cudaMemcpyDeviceToHost));

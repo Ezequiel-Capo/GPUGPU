@@ -19,10 +19,11 @@ __global__ void func_suma_arreglo(int *d_arreglo_ini, int *d_arreglo_res)
 {
     __shared__ int tile[TILE_DIM + 2];//2 extra para max y negativos suma
 
+    
     int tid = threadIdx.x;
     int gid = blockIdx.x * blockDim.x + tid; 
     // cargar desde global 
-    int val = d_arreglo_ini[gid];//registro
+    int val = d_arreglo_ini[gid];
     int max, negs;
     //carga desde registro
     tile[tid] = val;
@@ -46,10 +47,11 @@ __global__ void func_suma_arreglo(int *d_arreglo_ini, int *d_arreglo_res)
         tile[32] = max;
         tile[33] = negs;
     }
+   
     __syncthreads(); //cargo todos, solo espero por hilo0 realmente
 
     if (tid != 0){
-        max = tile[32];
+        max = tile[32]; 
         negs = tile[33];
     }
 
@@ -66,7 +68,6 @@ int main(int argc, char *argv[])
 {
     srand((unsigned int)time(NULL));
 
-    float times[11];
     int N = (1<<14);
     int block = 32; //COMPLETAMENTE NECESARIO PARA LA SHARED
     int size = N * sizeof(int);
@@ -77,8 +78,6 @@ int main(int argc, char *argv[])
         N = atoi(argv[1]);
     if (argc > 2) 
         v = atoi(argv[2]);
-    if (argc > 3) //NO ALTERAR
-        block = atoi(argv[3]);
     if (argc > 4) 
         a = atoi(argv[4]);
     if (argc > 5) 
@@ -108,46 +107,15 @@ int main(int argc, char *argv[])
 	dim3 block_s(block); //, size = x*y*4B (por letra fijo)
 	dim3 grid_s((N + block - 1) / block); //si N siempre multiplo no importa block_s-1
 
-    // Create CUDA events
-    cudaEvent_t start, stop;
-    CUDA_CHK(cudaEventCreate(&start));
-    CUDA_CHK(cudaEventCreate(&stop));
-
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < 10; i++) {
         // Start measuring time
-        CUDA_CHK(cudaEventRecord(start, 0));
 
         func_suma_arreglo<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
         CUDA_CHK(cudaGetLastError());
-
-        // Stop measuring time and compute
-        CUDA_CHK(cudaEventRecord(stop, 0));
-        CUDA_CHK(cudaEventSynchronize(stop));
-        CUDA_CHK(cudaEventElapsedTime(&times[i], start, stop));
-        printf("Run %d took: %.6f ms\n", i + 1, times[i]);
+        CUDA_CHK(cudaDeviceSynchronize());
     }
 
-    float mean = 0.0f;
-    for (int i = 1; i < 11; i++) { //elimino warm up
-        mean += times[i];
-    }
-    mean /= 10.0f;
-
-    float variance = 0.0f;
-    for (int i = 1; i < 11; i++) { //elimino warm up
-        float diff = times[i] - mean;
-        variance += diff * diff;
-    }
-    variance /= 10.0f;
-    float stddev = sqrtf(variance);
-
-    printf("Grid size: (%u), Block size: (%u)\n", grid_s.x, block_s.x);
-    printf("Tiempo promedio (10 runs): %.6f ms\n", mean);
-    printf("Desviación estándar: %.6f ms\n", stddev);
-    CUDA_CHK(cudaEventDestroy(start));
-    CUDA_CHK(cudaEventDestroy(stop));
-    //fin medicion tiempo
-
+    
     // copiar el de device a host
 	CUDA_CHK(cudaMemcpy(arreglo_res, d_arreglo_res, size, cudaMemcpyDeviceToHost));
 
