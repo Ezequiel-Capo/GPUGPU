@@ -15,50 +15,48 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
+__inline__ __device__ int warpReduceSum(int val, unsigned mask) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(mask, val, offset);
+    }
+    return val;
+}
+
+__inline__ __device__ int warpReduceMax(int val, unsigned mask)
+{
+    for (int offset = 16; offset > 0; offset /= 2){
+        int other = __shfl_down_sync(mask, val, offset);
+        if (other > val) {
+            val = other;
+        }
+    }
+    return val;
+}
+
 __global__ void func_suma_arreglo(int *d_arreglo_ini, int *d_arreglo_res)
 {
-    __shared__ int tile[TILE_DIM + 2];//2 extra para max y negativos suma
-
     int tid = threadIdx.x;
     int gid = blockIdx.x * blockDim.x + tid; 
-    // cargar desde global 
-    int val = d_arreglo_ini[gid];//registro
-    int max, negs;
-    //carga desde registro
-    tile[tid] = val;
 
-    __syncthreads(); //cargo todos
-   
-    if (tid == 0){ //lineal lo q se me ocurrio, capaz yuna variante de d&d pero para 32 hilos no vale la pena supongo
-        max = tile[0];
-        //max = -100;
-        negs = 0;
-        for (int i = 0; i < 32; i++) {
-            if (tile[i] > max) {
-                max = tile[i];
-            }
-        }
-        for (int i = 0; i < 32; i++) {
-            if (tile[i] < 0) {
-                negs += tile[i];
-            }    
-        }
-        tile[32] = max;
-        tile[33] = negs;
+    int val = d_arreglo_ini[gid];
+
+    unsigned negsMask = __ballot_sync(0xFFFFFFFFu, (val < 0));
+    unsigned posMask = ~negsMask;
+
+    int negVal = val;
+    if (val >= 0) {
+        negVal = 0;
     }
-    __syncthreads(); //cargo todos, solo espero por hilo0 realmente
+    int negSum = warpReduceSum(negVal, negsMask);//todos los hilos llaman, uso 16 primeros, si son positivos no deben aportar
+    negSum = __shfl_sync(negsMask, negSum, 0);//__shfl_sync(unsigned mask, T var, int srcLane, int width=32);
 
-    if (tid != 0){
-        max = tile[32];
-        negs = tile[33];
-    }
+    int maxVal = warpReduceMax(val, posMask); //todos los hilos llaman, uso 16 primeros, si son negativos no deben aportar
+    maxVal = __shfl_sync(posMask, maxVal, 0);
 
-    __syncthreads(); //cargo todos
-
-    if (val < 0)  
-        d_arreglo_res[gid] = negs + max; 
+    if (val < 0)
+        d_arreglo_res[gid] = negSum + maxVal;
     else
-        d_arreglo_res[gid] = val;
+        d_arreglo_res[gid] = maxVal;
 }
 
 
