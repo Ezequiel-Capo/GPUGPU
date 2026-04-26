@@ -31,7 +31,7 @@ __inline__ __device__ int warpReduceMax(int val, unsigned mask){
     return val;
 }
 
-__global__ void func_suma_arreglo(int *d_arreglo_ini, int *d_arreglo_res)
+__global__ void kernel_func_arreglo_shfl(int *d_arreglo_ini, int *d_arreglo_res)
 {
     int tid = threadIdx.x;
     int gid = blockIdx.x * blockDim.x + tid; 
@@ -101,7 +101,7 @@ int main(int argc, char *argv[])
 	dim3 grid_s((N + block - 1) / block); //si N siempre multiplo no importa block_s-1
 
     for (int i = 0; i < 10; i++) {
-        func_suma_arreglo<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
+        kernel_func_arreglo_shfl<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
         CUDA_CHK(cudaGetLastError());
         CUDA_CHK(cudaDeviceSynchronize());
     }

@@ -15,7 +15,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-__global__ void func_suma_arreglo(int *d_arreglo_ini, int *d_arreglo_res)
+__global__ void kernel_func_arreglo_shared(int *d_arreglo_ini, int *d_arreglo_res)
 {
     __shared__ int tile[TILE_DIM + 2];//2 extra para max y negativos suma
 
@@ -110,7 +110,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < 10; i++) {
         // Start measuring time
 
-        func_suma_arreglo<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
+        kernel_func_arreglo_shared<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
         CUDA_CHK(cudaGetLastError());
         CUDA_CHK(cudaDeviceSynchronize());
     }
