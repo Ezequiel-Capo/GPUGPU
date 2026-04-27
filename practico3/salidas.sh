@@ -12,7 +12,7 @@ mostrar_cat() {
 mostrar_kernel() {
     file=$1
     if [ -s "$file" ]; then
-        echo " Time(%) | Total(ns) | Inst | Avg(ns) | Med(ns) | Min(ns) | Max(ns) | StdDev(ns) | Kernel"
+        echo " Time(%) | Total(ns) | Instances | Avg(ns) | Med(ns) | Min(ns) | Max(ns) | StdDev(ns) | Kernel"
         grep kernel "$file"
     else
         echo "[pendiente] $file no disponible o vacío"
