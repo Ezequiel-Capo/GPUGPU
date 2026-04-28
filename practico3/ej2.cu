@@ -70,7 +70,6 @@ int main(int argc, char *argv[])
 
     int N = (1<<14);
     int block = 32; //COMPLETAMENTE NECESARIO PARA LA SHARED
-    int size = N * sizeof(int);
     int a = 0;
     int b = 100;
     char v = 0;
@@ -83,6 +82,7 @@ int main(int argc, char *argv[])
     if (argc > 5) 
         b = atoi(argv[5]);
     
+    int size = N * sizeof(int);
     // Reservar memoria en host
     int * arreglo_ini = (int *)malloc(size);
     int * arreglo_res = (int *)malloc(size);
