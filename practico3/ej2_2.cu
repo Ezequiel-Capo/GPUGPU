@@ -24,9 +24,9 @@ __inline__ __device__ int warpReduceSum(int val, unsigned mask) {
 
 __inline__ __device__ int warpReduceMax(int val, unsigned mask){
     for (int offset = 16; offset > 0; offset /= 2){
-        int other = __shfl_down_sync(mask, val, offset);
-        if (other > val) 
-            val = other;
+        int pivot = __shfl_down_sync(mask, val, offset);
+        if (pivot > val) 
+            val = pivot;
     }
     return val;
 }
@@ -40,16 +40,14 @@ __global__ void kernel_func_arreglo_shfl(int *d_arreglo_ini, int *d_arreglo_res)
     unsigned mask = 0xFFFFFFFFu;
     unsigned negsMask = __ballot_sync(mask, (val < 0));
     //unsigned posMask = ~negsMask;
-
     int negVal = 0;
     if (val < 0)
        negVal = val;
 
-    //negsMask = negsMask | 0x00000001u;//por si el source tiene q ser incluido en mascara
     int negSum = warpReduceSum(negVal, mask);
-    negSum = __shfl_sync(negsMask, negSum, 0);
-
     int maxVal = warpReduceMax(val, mask); 
+
+    negSum = __shfl_sync(negsMask, negSum, 0);
     maxVal = __shfl_sync(negsMask, maxVal, 0);
 
     if (val < 0)
@@ -63,7 +61,7 @@ int main(int argc, char *argv[])
 {
     srand((unsigned int)time(NULL));
 
-    int N = (1<<14);
+    int N = (1<<28);
     int block = 32; //COMPLETAMENTE NECESARIO PARA LA SHARED
     int a = 0;
     int b = 100;

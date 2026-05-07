@@ -76,7 +76,7 @@ int main(int argc, char *argv[])
 {
     srand((unsigned int)time(NULL));
 
-    int N = (1<<14);
+    int N = (1<<28);
     int block = 32; //COMPLETAMENTE NECESARIO PARA LA SHARED
     int a = 0;
     int b = 100;

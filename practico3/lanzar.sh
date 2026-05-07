@@ -26,6 +26,9 @@ case "$exe" in
 	"./ej2")
 		nvcc -O2 -o ej2 ej2.cu
 		;;
+	"./ej2_1")
+		nvcc -O2 -o ej2_1 ej2_1.cu
+		;;
 	"./ej2_2")
 		nvcc -O2 -o ej2_2 ej2_2.cu
 		;;
