@@ -37,15 +37,16 @@ __global__ void kernel_func_arreglo_shfl(int *d_arreglo_ini, int *d_arreglo_res)
     int gid = blockIdx.x * blockDim.x + tid; 
 
     int val = d_arreglo_ini[gid];
+
+
     unsigned mask = 0xFFFFFFFFu;
     unsigned negsMask = __ballot_sync(mask, (val < 0));
-    //unsigned posMask = ~negsMask;
+    unsigned posMask = ~negsMask;
 
     int negVal = 0;
     if (val < 0)
        negVal = val;
 
-    //negsMask = negsMask | 0x00000001u;//por si el source tiene q ser incluido en mascara
     int negSum = warpReduceSum(negVal, mask);
     negSum = __shfl_sync(negsMask, negSum, 0);
 
