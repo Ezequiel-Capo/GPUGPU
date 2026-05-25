@@ -37,7 +37,7 @@ printf "Ejercicio 2 parte 1-1: shared memory arreglo de 64 elementos, alternativ
 mostrar_cat e2_1.out
 printf "\n"
 
-printf "Ejercicio 2 parte 1-2: shared memory arreglo de 2^14 elementos, alternativa lineal\n\n"
+printf "Ejercicio 2 parte 1-2: shared memory arreglo de 2^28 elementos, alternativa lineal\n\n"
 mostrar_kernel e2_2.out
 printf "\n"
 
@@ -45,7 +45,7 @@ printf "Ejercicio 2 parte 2-1:  shared memory arreglo arreglo de 64 elementos\n\
 mostrar_cat e3_1.out
 printf "\n"
 
-printf "Ejercicio 2 parte 2-2:  shared memory arreglo arreglo de 2^14\n\n"
+printf "Ejercicio 2 parte 2-2:  shared memory arreglo arreglo de 2^28 elementos\n\n"
 mostrar_kernel e3_2.out
 printf "\n"
 
@@ -54,6 +54,6 @@ printf "Ejercicio 2 parte 2-1: warp shuffle arreglo de 64 elementos\n\n"
 mostrar_cat e4_1.out
 printf "\n"
 
-printf "Ejercicio 2 parte 2-2: warp shuffle arreglo de 2^14\n\n"
+printf "Ejercicio 2 parte 2-2: warp shuffle arreglo de 2^28 elementos\n\n"
 mostrar_kernel e4_2.out
 printf "\n"

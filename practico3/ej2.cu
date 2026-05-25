@@ -106,6 +106,7 @@ int main(int argc, char *argv[])
     //total_threads = N
 	dim3 block_s(block); //, size = x*y*4B (por letra fijo)
 	dim3 grid_s((N + block - 1) / block); //si N siempre multiplo no importa block_s-1
+    printf("N: %d, block: %d, grid: %d\n", N, block_s.x, grid_s.x);
 
     for (int i = 0; i < 10; i++) {
         // Start measuring time

@@ -74,7 +74,7 @@ printf "Ejercicio 2 parte 1-1: shared memory arreglo de 64 elementos, alternativ
 cat e2_1.out
 printf "\n"
 
-printf "Ejercicio 2 parte 1-2: shared memory arreglo de 2^14 elementos, alternativa lineal)\n\n"
+printf "Ejercicio 2 parte 1-2: shared memory arreglo de 2^28 elementos, alternativa lineal)\n\n"
 echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
 grep kernel e2_2.out
 printf "\n"
@@ -83,7 +83,7 @@ printf "Ejercicio 2 parte 1-1: shared memory arreglo de 64 elementos)\n\n"
 cat e3_1.out
 printf "\n"
 
-printf "Ejercicio 2 parte 1-2: shared memory arreglo de 2^14 elementos)\n\n"
+printf "Ejercicio 2 parte 1-2: shared memory arreglo de 2^28 elementos)\n\n"
 echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
 grep kernel e3_2.out
 printf "\n"
@@ -93,7 +93,7 @@ printf "Ejercicio 2 parte 2-1: warp shuffle arreglo de 64 elementos)\n\n"
 cat e4_1.out
 printf "\n"
 
-printf "Ejercicio 2 parte 2-2: warp shuffle arreglo de 2^14)\n\n"
+printf "Ejercicio 2 parte 2-2: warp shuffle arreglo de 2^28 elementos)\n\n"
 echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
 grep kernel e4_2.out
 printf "\n"
