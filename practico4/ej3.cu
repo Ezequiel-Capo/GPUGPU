@@ -4,7 +4,6 @@
 #include <time.h>
 #include "cuda.h"
 #include <cooperative_groups.h>
-#include <cooperative_groups/reduce.h>
 
 namespace cg = cooperative_groups;
 
@@ -25,12 +24,12 @@ __global__ void kernel_redux_coop_g(const int* x, int* y, int vectorSize){
     cg::thread_block block = cg::this_thread_block();
 
     // Particiona el bloque en grupos cooperativos de 8 hilos
-    cg::thread_block_tile<8> coop_g = cg::tiled_partition<8>(block);
+    cg::tiled_partition<8> coop_g = cg::tiled_partition<8>(block);
 
     int tid = threadIdx.x;
     int gid = blockIdx.x * blockDim.x + tid; 
 
-    if (vectorSize >= gid){
+    if (vectorSize > gid){
         int valor = x[gid];
 
         int lane = coop_g.thread_rank(); // Índice dentro del grupo de 8 hilos
@@ -51,7 +50,7 @@ int main(int argc, char *argv[])
     srand((unsigned int)time(NULL));
 
     int N = (1<<28);//2^28 
-    int block = 256; 
+    int block = 32; 
     int a = 0;
     int b = 10;
     char v = 0;

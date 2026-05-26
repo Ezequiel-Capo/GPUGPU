@@ -4,7 +4,7 @@
 #include <time.h>
 #include "cuda.h"
 #include <cooperative_groups.h>
-
+#include <cooperative_groups/reduce.h>
 
 namespace cg = cooperative_groups;
 
@@ -26,15 +26,16 @@ __global__ void kernel_redux_coop_g_labeled(const int* x, int* y, int* label, in
 
     // Obtiene el grupo cooperativo del bloque actual
     cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
-    int segmento =  label[gid];
-    // Particiona el bloque en grupos cooperativos de 8 hilos
-    cg::coalesced_group labeled_group = cg::labeled_partition(warp, segmento);
+    if (vectorSize >= gid){
+        int segmento =  label[gid];
 
-    if (vectorSize > gid){
+        cg::coalesced_group labeled_group = cg::labeled_partition(warp, segmento);
+
         int valor = x[gid];
 
-        int lane = labeled_group.thread_rank(); // Índice dentro del grupo de 8 hilos
+        int lane = labeled_group.thread_rank(); 
             
         int suma = cg::reduce(labeled_group, valor, cg::plus<int>());
 
@@ -46,13 +47,12 @@ __global__ void kernel_redux_coop_g_labeled(const int* x, int* y, int* label, in
 }
 
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
     srand((unsigned int)time(NULL));
 
     int N = (1<<28);//2^28 
     int cambioLabel = 4; 
-    int block = 32; 
+    int block = 256; 
     int a = 0;
     int b = 10;
     char v = 0;
@@ -71,8 +71,8 @@ int main(int argc, char *argv[])
         b = atoi(argv[6]);
 
     int size = N * sizeof(int);
-    int sizeSeg = (size + cambioLabel - 1) / cambioLabel; //tamño por segmento, ceil
-
+    int Nseg = (N + cambioLabel - 1) / cambioLabel; //tamño por segmento, ceil
+    int sizeSeg = Nseg * sizeof(int);
     printf("Vector size: %d, Segment size: %d\n", N, sizeSeg);
 
     // Reservar memoria en host
@@ -83,9 +83,9 @@ int main(int argc, char *argv[])
     int label = 0;
     for (int i = 0; i <  N; i++) {
         h_vector_x[i] = (a + rand() % (b - a + 1)); //naturales de 0 a 10
-        if (i % cambioLabel == 0) //etiqueta constante cada cambioLabel elementos luego aumenta.
-            label++;
         h_vector_labels[i] = label; 
+        if ((i+1) % cambioLabel == 0) //etiqueta constante cada cambioLabel elementos luego aumenta.
+            label++;
     }
 
 
@@ -99,7 +99,7 @@ int main(int argc, char *argv[])
 	// copiar el de host a device
 	CUDA_CHK(cudaMemcpy(d_vector_x, h_vector_x, size, cudaMemcpyHostToDevice));
     CUDA_CHK(cudaMemcpy(d_vector_labels, h_vector_labels, size, cudaMemcpyHostToDevice));
-
+    CUDA_CHK(cudaMemcpy(d_vector_y, h_vector_y, sizeSeg, cudaMemcpyHostToDevice));
     //total_threads = #blocks * #threads_per_block
     //total_threads = N
 	dim3 block_s(block); //
@@ -134,7 +134,7 @@ int main(int argc, char *argv[])
         }
         printf("\n");
         printf("vector y:\n");
-        for (int i = 0; i < sizeSeg; i++) {
+        for (int i = 0; i < Nseg; i++) {
             printf("%d ", h_vector_y[i]);
         }
         printf("\n");
