@@ -3,10 +3,17 @@
 #include <math.h>
 #include <time.h>
 #include "cuda.h"
-#include <cooperative_groups.h>
 
-namespace cg = cooperative_groups;
+#define K 10
 
+
+struct Bin_selector { 
+    __host__ __device__
+
+    int operator() (int x) const {
+        return x / K;
+    }
+};
 
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -18,111 +25,123 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-__global__ void kernel_redux_coop_g(const int* x, int* y, int vectorSize){
 
-    // Obtiene el grupo cooperativo del bloque actual
-    cg::thread_block block = cg::this_thread_block();
+void inicializar_vector(int **v, int N)
+{
+    *v = (int*)malloc(N * sizeof(int));
 
-    // Particiona el bloque en grupos cooperativos de 8 hilos
-    cg::tiled_partition<8> coop_g = cg::tiled_partition<8>(block);
-
-    int tid = threadIdx.x;
-    int gid = blockIdx.x * blockDim.x + tid; 
-
-    if (vectorSize > gid){
-        int valor = x[gid];
-
-        int lane = coop_g.thread_rank(); // Índice dentro del grupo de 8 hilos
-            
-        int suma = cg::reduce(coop_g, valor, cg::plus<int>());
-
-        if (lane == 0) {
-            int segmento = gid / 8 ;//floor por defecto
-            y[segmento] = suma;
-        }
+    // 0,1,2,...,N-1
+    for (int i = 0; i < N; i++) {
+        (*v)[i] = i;
     }
-    
-}
 
+    // shuffle determinístico
+    for (int i = 0; i < N; i++) {
+
+        int j = (37 * i + 13) % N;
+
+        int tmp = (*v)[i];
+        (*v)[i] = (*v)[j];
+        (*v)[j] = tmp;
+    }
+}
 
 int main(int argc, char *argv[])
 {
-    srand((unsigned int)time(NULL));
 
     int N = (1<<28);//2^28 
-    int block = 32; 
-    int a = 0;
-    int b = 10;
+
     char v = 0;
+
     if (argc > 1) 
         N = atoi(argv[1]);
     if (argc > 2) 
         v = atoi(argv[2]);
-    if (argc > 4) 
-        a = atoi(argv[4]);
-    if (argc > 5) 
-        b = atoi(argv[5]);
 
     int size = N * sizeof(int);
-    int sizeSeg = size / 8; //tamño por segmento
+    
 
-    printf("Vector size: %d, Segment size: %d\n", N, N/8);
+    printf("Vector size: %d, N");
+
     // Reservar memoria en host
-    int * h_vector_x = (int *)malloc(size);
-    int * h_vector_y = (int *)malloc(sizeSeg);
+    //int * h_vector_x = (int *)malloc(size);
+    int * h_input;
+    int * h_output = (int *) malloc(size);
 
-    for (int i = 0; i <  N; i++) 
-        h_vector_x[i] = (a + rand() % (b - a + 1)); //naturales de 0 a 10
-    
+    // se podria  usar thrust::generate(thrust::host, v.begin(), v.end(), rand);
+    inicializar_vector(&h_input, N);
 
-    // Reservar memoria en device
-    int *d_vector_x, *d_vector_y;
-	// reservar memoria en la GPU
-	CUDA_CHK(cudaMalloc((void **)&d_vector_x, size));
-	CUDA_CHK(cudaMalloc((void **)&d_vector_y, sizeSeg));
+    thrust::device_vector<int> d_input(h_input, h_input + N);
+    thrust::device_vector<int> d_bins(N);
+    thrust::device_vector<int> d_output = d_input;
 
-	// copiar el de host a device
-	CUDA_CHK(cudaMemcpy(d_vector_x, h_vector_x, size, cudaMemcpyHostToDevice));
+    // [20,12,2,7] -> [2,1,0,0]
+    thrust::transform(d_input.begin(), d_input.end(), d_bins.begin(), Bin_selector()); //aplica la funcion a cada elemento del vector input y lo guarda en bins
 
-    //total_threads = #blocks * #threads_per_block
-    //total_threads = N
-	dim3 block_s(block); //
+    // [2,1,0,0] -> [0,0,1,2] && [20,12,7,2] -> [7,2,12,20], stable mantiene orden relativo. ACA no se si hay una func mejor ver luego
+    thrust::stable_sort_by_key(d_bins.begin(), d_bins.end(), d_output.begin()); //ordena bins y reordena output a su vez.
 
-	dim3 grid_s((N + block - 1) / block); //si N siempre multiplo no importa block_s-1
+    //ordenadados tomo el último
+    int num_bins = d_bins.back() ;// *thrust::max_element(d_input.begin(), d_input.end());
+    if (num_bins < N ) 
+        num_bins += 1; 
+    else
+        return -1; 
 
-    printf("N: %d, block: %d, grid: %d\n", N, block_s.x, grid_s.x);
+    thrust::device_vector<int> d_bin_counts(num_bins); //creo bin_count con largo num_bins
+    thrust::device_vector<int> d_bin_offsets(num_bins); //creo bin_offset con largo num_bins
 
-    for (int i = 0; i < 10; i++) 
-        kernel_redux_coop_g<<<grid_s, block_s>>>(d_vector_x, d_vector_y, N);
-    
+    //Tengo que contar cuántos elementos hay en cada bin, para eso uso reduce_by_key
+    //input keys -> bins: [0,0,0,0,1,1,2,3]
+    //input values -> [1,1,1,1,1,1,1,1], o bueno 1 constante
+    thrust::constant_iterator<int> val_iter(1);
+    //descarto claves y me quedo con lo que es bin_count
+    thrust::reduce_by_key(thrust::host, d_bins.begin(), d_bins.end(), val_iter, thrust::make_discard_iterator(), d_bin_counts.begin());
 
-    CUDA_CHK(cudaDeviceSynchronize());
 
-    // copiar el de device a host
-	CUDA_CHK(cudaMemcpy(h_vector_y, d_vector_y, sizeSeg, cudaMemcpyDeviceToHost));
+    //bin_counts = [4, 2, 1, 1] -> es usar excl sccn
+    //bin_offsets = [0, 4, 6, 7]
+    thrust::exclusive_scan(d_bin_counts.begin(), d_bin_counts.end(), d_bin_offsets.begin());
 
-    //liberar mem gpu
-	CUDA_CHK(cudaFree(d_vector_x));
-	CUDA_CHK(cudaFree(d_vector_y));
+
+
+
+    //Copiar resultados a  host
+    thrust::copy(d_output.begin(), d_output.end(), h_output);
+    thrust::host_vector<int> h_bin_counts = d_bin_counts;
+    thrust::host_vector<int> h_bin_offsets = d_bin_offsets;
+
 
     // despliego la matriz resultante
     if (v) {
-        printf("vector x:\n");
+        printf("input:\n");
         for (int i = 0; i < N; i++) {
-            printf("%d ", h_vector_x[i]);
+            printf("%d ", h_input[i]);
         }
         printf("\n");
 
-        printf("vector y:\n");
-        for (int i = 0; i < N/8; i++) {
-            printf("%d ", h_vector_y[i]);
+        printf("output:\n");
+        for (int i = 0; i < N; i++) {
+            printf("%d ", h_output[i]);
+        }
+        printf("\n");
+        
+        printf("bin counts:\n");
+        for (int i = 0; i < num_bins; i++) {
+            printf("%d ", h_bin_counts[i]);
+        }
+        printf("\n");
+        
+        printf("bins offset:\n");
+        for (int i = 0; i < num_bins; i++) {
+            printf("%d ", h_bin_offsets[i]);
         }
         printf("\n");
     }
 
 	// libero la memoria en la CPU
-	free(h_vector_y);
-	free(h_vector_x);
+	free(h_output);
+	free(h_input);
 
 	return 0;
 }
