@@ -74,7 +74,6 @@ int main(int argc, char *argv[])
     if (argc > 2) N = atoi(argv[2]); //pasar string a int
     if (argc > 3) v = atoi(argv[3]); //pasar string a int
 
-
     unsigned int size = N * N * sizeof(float);
     
     // Reservar memoria en host

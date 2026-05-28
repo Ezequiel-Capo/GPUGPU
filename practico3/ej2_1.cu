@@ -5,7 +5,6 @@
 #include "cuda.h"
 
 #define TILE_DIM 32
-#define MASK 0xFFFFFFFFu
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
@@ -16,42 +15,58 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-__inline__ __device__ int warpReduceSum(int val, unsigned mask) {
-    for (int offset = 16; offset > 0; offset /= 2) 
-        val += __shfl_down_sync(mask, val, offset);
-    return val;
-}
-
-
-__inline__ __device__ int warpReduceMax(int val, unsigned mask){
-    for (int offset = 16; offset > 0; offset /= 2){
-        int pivot = __shfl_down_sync(mask, val, offset);
-        if (pivot > val) 
-            val = pivot;
+__inline__ __device__ int SharedReduceSum(int val, int tid, int *shared) {
+    for (int offset = TILE_DIM / 2; offset > 0; offset /= 2) {
+        if (tid < offset) {
+            shared[tid] += shared[tid + offset];
+        }
+        __syncthreads();
     }
-    return val;
+
+    return shared[0];
 }
 
-__global__ void kernel_func_arreglo_shfl(int *d_arreglo_ini, int *d_arreglo_res)
+
+__inline__ __device__ int SharedReduceMax(int val, int tid, int *shared) { 
+    
+    for (int offset = TILE_DIM / 2; offset > 0; offset /= 2) {
+        if (tid < offset) {
+            if (shared[tid + offset] > shared[tid]) {
+                shared[tid] = shared[tid + offset];
+            }
+        }
+        __syncthreads();
+    }
+
+    return shared[0];
+}
+
+__global__ void kernel_func_arreglo_shared(int *d_arreglo_ini, int *d_arreglo_res)
 {
+    __shared__ int tiles_neg[TILE_DIM];
+    __shared__ int tiles_max[TILE_DIM];
+
+    
     int tid = threadIdx.x;
     int gid = blockIdx.x * blockDim.x + tid; 
 
+    // cargar desde global 
     int val = d_arreglo_ini[gid];
-    unsigned negsMask = __ballot_sync(MASK, (val < 0));
-    //unsigned posMask = ~negsMask;
+
     int negVal = 0;
     if (val < 0)
-       negVal = val;
+        negVal = val;
+    //carga desde registro
+    tiles_neg[tid] = negVal;
+    tiles_max[tid] = val;
 
-    int negSum = warpReduceSum(negVal, MASK);
-    int maxVal = warpReduceMax(val, MASK); 
+    __syncthreads(); //cargo todos
+   
+    int negs = SharedReduceSum(negVal, tid, tiles_neg);
+    int max = SharedReduceMax(val, tid, tiles_max);
 
-    negSum = __shfl_sync(negsMask, negSum, 0);
-    maxVal = __shfl_sync(negsMask, maxVal, 0);
-
-    if (val < 0)
-        d_arreglo_res[gid] = negSum + maxVal;
+    if (val < 0)  
+        d_arreglo_res[gid] = negs + max; 
     else
         d_arreglo_res[gid] = val;
 }
@@ -74,12 +89,12 @@ int main(int argc, char *argv[])
         a = atoi(argv[4]);
     if (argc > 5) 
         b = atoi(argv[5]);
-
-    int size = N * sizeof(int);
     
+    int size = N * sizeof(int);
     // Reservar memoria en host
     int * arreglo_ini = (int *)malloc(size);
     int * arreglo_res = (int *)malloc(size);
+
 
     for (int i = 0; i <  N; i++) {
         int signo = (rand() % 2) ? 1 : -1;
@@ -102,11 +117,14 @@ int main(int argc, char *argv[])
     printf("N: %d, block: %d, grid: %d\n", N, block_s.x, grid_s.x);
 
     for (int i = 0; i < 10; i++) {
-        kernel_func_arreglo_shfl<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
+        // Start measuring time
+
+        kernel_func_arreglo_shared<<<grid_s, block_s>>>(d_arreglo_ini, d_arreglo_res);
         CUDA_CHK(cudaGetLastError());
         CUDA_CHK(cudaDeviceSynchronize());
     }
 
+    
     // copiar el de device a host
 	CUDA_CHK(cudaMemcpy(arreglo_res, d_arreglo_res, size, cudaMemcpyDeviceToHost));
 

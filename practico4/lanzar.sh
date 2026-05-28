@@ -13,7 +13,7 @@
 
 PATH=$PATH:/usr/local/cuda/bin
 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
-
+#nvcc --version
 set -e
 
 exe="$1"
@@ -21,16 +21,16 @@ shift
 
 case "$exe" in
 	"./ej1")
-		nvcc -O2 -o ej1 ej1.cu
+		nvcc -O2 -arch=sm_75 -o ej1 ej1.cu
 		;;
 	"./ej2")
-		nvcc -O2 -o ej2 ej2.cu
+		nvcc -O2 -arch=sm_75 -o ej2 ej2.cu
 		;;
 	"./ej2_1")
-		nvcc -O2 -o ej2_1 ej2_1.cu
+		nvcc -O2 -arch=sm_75 -o ej2_1 ej2_1.cu
 		;;
-	"./ej2_2")
-		nvcc -O2 -o ej2_2 ej2_2.cu
+	"./ej3")
+		nvcc -O2 -arch=sm_75 -o ej3 ej3.cu
 		;;
 	*)
 		echo "Error: ejecutable no soportado: $exe"

@@ -68,9 +68,8 @@ int main(int argc, char *argv[])
 {
     srand((unsigned int)time(NULL));
 
-    int N = (1<<14);
+    int N = (1<<28); //256M
     int block = 32; //COMPLETAMENTE NECESARIO PARA LA SHARED
-    int size = N * sizeof(int);
     int a = 0;
     int b = 100;
     char v = 0;
@@ -83,6 +82,7 @@ int main(int argc, char *argv[])
     if (argc > 5) 
         b = atoi(argv[5]);
     
+    int size = N * sizeof(int);
     // Reservar memoria en host
     int * arreglo_ini = (int *)malloc(size);
     int * arreglo_res = (int *)malloc(size);
@@ -106,6 +106,7 @@ int main(int argc, char *argv[])
     //total_threads = N
 	dim3 block_s(block); //, size = x*y*4B (por letra fijo)
 	dim3 grid_s((N + block - 1) / block); //si N siempre multiplo no importa block_s-1
+    printf("N: %d, block: %d, grid: %d\n", N, block_s.x, grid_s.x);
 
     for (int i = 0; i < 10; i++) {
         // Start measuring time
