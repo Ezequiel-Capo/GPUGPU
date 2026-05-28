@@ -3,6 +3,15 @@
 #include <math.h>
 #include <time.h>
 #include "cuda.h"
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/transform.h>
+#include <thrust/sort.h>
+#include <thrust/scan.h>
+
+#include <thrust/iterator/constant_iterator.h>
+#include <thrust/iterator/discard_iterator.h>
+#include <thrust/reduce.h>
 
 #define K 10
 
@@ -26,6 +35,90 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 
+void imprimir_y_guardar_csv(
+    const int *input,
+    const int *output,
+    int N,
+    const int *bin_counts,
+    const int *bin_offsets,
+    int num_bins,
+    const char *csv_filename
+) {
+    FILE *f = fopen(csv_filename, "w");
+
+    if (f == NULL) {
+        printf("Error abriendo archivo CSV\n");
+        return;
+    }
+
+    // encabezado CSV
+    fprintf(f, "input,output,bin_counts,bin_offsets\n");
+
+    printf("-------------------------------------------------------------\n");
+    printf("%10s %10s %15s %15s\n",
+           "input", "output", "bin_counts", "bin_offsets");
+    printf("-------------------------------------------------------------\n");
+
+    int max_rows = N;
+
+    if (num_bins > max_rows) {
+        max_rows = num_bins;
+    }
+
+    for (int i = 0; i < max_rows; i++) {
+
+        // consola
+        if (i < N)
+            printf("%10d ", input[i]);
+        else
+            printf("%10s ", "");
+
+        if (i < N)
+            printf("%10d ", output[i]);
+        else
+            printf("%10s ", "");
+
+        if (i < num_bins)
+            printf("%15d ", bin_counts[i]);
+        else
+            printf("%15s ", "");
+
+        if (i < num_bins)
+            printf("%15d ", bin_offsets[i]);
+        else
+            printf("%15s ", "");
+
+        printf("\n");
+
+        // CSV
+        if (i < N)
+            fprintf(f, "%d,", input[i]);
+        else
+            fprintf(f, ",");
+
+        if (i < N)
+            fprintf(f, "%d,", output[i]);
+        else
+            fprintf(f, ",");
+
+        if (i < num_bins)
+            fprintf(f, "%d,", bin_counts[i]);
+        else
+            fprintf(f, ",");
+
+        if (i < num_bins)
+            fprintf(f, "%d", bin_offsets[i]);
+
+        fprintf(f, "\n");
+    }
+
+    fclose(f);
+
+    printf("-------------------------------------------------------------\n");
+    printf("CSV guardado en: %s\n", csv_filename);
+}
+
+
 void inicializar_vector(int **v, int N)
 {
     *v = (int*)malloc(N * sizeof(int));
@@ -46,10 +139,9 @@ void inicializar_vector(int **v, int N)
     }
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
 
-    int N = (1<<28);//2^28 
+    int N = (1<<20);//2^20 
 
     char v = 0;
 
@@ -96,14 +188,12 @@ int main(int argc, char *argv[])
     //input values -> [1,1,1,1,1,1,1,1], o bueno 1 constante
     thrust::constant_iterator<int> val_iter(1);
     //descarto claves y me quedo con lo que es bin_count
-    thrust::reduce_by_key(thrust::host, d_bins.begin(), d_bins.end(), val_iter, thrust::make_discard_iterator(), d_bin_counts.begin());
+    thrust::reduce_by_key(d_bins.begin(), d_bins.end(), val_iter, thrust::make_discard_iterator(), d_bin_counts.begin());
 
 
     //bin_counts = [4, 2, 1, 1] -> es usar excl sccn
     //bin_offsets = [0, 4, 6, 7]
     thrust::exclusive_scan(d_bin_counts.begin(), d_bin_counts.end(), d_bin_offsets.begin());
-
-
 
 
     //Copiar resultados a  host
@@ -139,9 +229,20 @@ int main(int argc, char *argv[])
         printf("\n");
     }
 
+    imprimir_y_guardar_csv(
+        input,
+        output,
+        N,
+        h_bin_counts,
+        h_bin_offsets,
+        num_bins,
+        "resultado.csv"
+    );
 	// libero la memoria en la CPU
 	free(h_output);
 	free(h_input);
+    free(h_bin_counts);
+    free(h_bin_offsets);
 
 	return 0;
 }

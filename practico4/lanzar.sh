@@ -32,6 +32,9 @@ case "$exe" in
 	"./ej3")
 		nvcc -O2 -arch=sm_75 -o ej3 ej3.cu
 		;;
+	"./codigoBins")
+		nvcc -O2 -arch=sm_75 -o codigoBins codigoBins.cu
+		;;
 	*)
 		echo "Error: ejecutable no soportado: $exe"
 		exit 1
