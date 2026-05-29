@@ -212,7 +212,7 @@ int main(int argc, char *argv[]) {
             h_bin_counts,
             h_bin_offsets,
             num_bins,
-            "resultado.csv"
+            "resultados_paralelos.csv"
         );
     }
 
