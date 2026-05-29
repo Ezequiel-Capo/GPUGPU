@@ -141,12 +141,12 @@ printf "\n"
 
 printf "Ejercicio 3: Bins Thrust vs Bins Secuencial, N = 1000\n\n"
 echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
-grep kernel "e3_c.out"
+grep B_PARALELO "e3_c.out"
 printf "\n"
 
 printf "Bins secuenciales CodigoBins, N = 1000\n"
 echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
-grep kernel "e3sec_c.out"
+grep B_SECUENCIAL "e3sec_c.out"
 printf "\n"
 printf "\n"
 

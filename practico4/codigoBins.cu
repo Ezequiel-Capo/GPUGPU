@@ -175,10 +175,14 @@ void inicializar_vector(int **v, int N)
 
 
 
-int main() {
-
-
+int main(int argc, char *argv[]) {
     int N = 1000;
+    char v = 0;
+
+    if (argc > 1)
+        N = atoi(argv[1]);
+    if (argc > 2)
+        v = atoi(argv[2]);
 
     int* input;
 
@@ -199,16 +203,17 @@ int main() {
         &num_bins);
     
 
-
-    imprimir_y_guardar_csv(
-        input,
-        output,
-        N,
-        bin_counts,
-        bin_offsets,
-        num_bins,
-        "resultado.csv"
-    );
+    if (v){
+        imprimir_y_guardar_csv(
+            input,
+            output,
+            N,
+            bin_counts,
+            bin_offsets,
+            num_bins,
+            "resultado.csv"
+        );
+    }
 
     free(output);
     free(bin_counts);
