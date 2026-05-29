@@ -20,9 +20,15 @@ exe="$1"
 shift
 
 case "$exe" in
-	"./ej1")
-		nvcc -O2 -arch=sm_75 -o ej1 ej1.cu
+	"./ej1_1")
+		nvcc -O2 -arch=sm_75 -o ej1 ej1_1.cu
 		;;
+	"./ej1_2")
+		nvcc -O2 -arch=sm_75 -o ej1_cub ej1_2_cub.cu
+		;;
+	"./ej1_3")
+		nvcc -O2 -arch=sm_75 -o ej1_thrust ej1_3_Thrust.cu
+		;;				
 	"./ej2")
 		nvcc -O2 -arch=sm_75 -o ej2 ej2.cu
 		;;

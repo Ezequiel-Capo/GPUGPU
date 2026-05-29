@@ -175,14 +175,15 @@ int main() {
     int *bin_offsets = NULL;
     int num_bins = 0;
 
-    agrupar_serial(
-        input,
-        N,
-        output,
-        &bin_counts,
-        &bin_offsets,
-        &num_bins
-    );
+    for (int i = 0; i < 10; i++) {
+        agrupar_serial(
+            input,
+            N,
+            output,
+            &bin_counts,
+            &bin_offsets,
+            &num_bins);
+    }
 
 
     imprimir_y_guardar_csv(

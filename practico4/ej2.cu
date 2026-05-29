@@ -42,9 +42,7 @@ __global__ void kernel_redux_coop_g(const int* x, int* y, int vectorSize){
             y[segmento] = suma;
         }
     }
-    
 }
-
 
 int main(int argc, char *argv[])
 {
@@ -55,10 +53,13 @@ int main(int argc, char *argv[])
     int a = 0;
     int b = 10;
     char v = 0;
+    
     if (argc > 1) 
         N = atoi(argv[1]);
     if (argc > 2) 
         v = atoi(argv[2]);
+    if (argc > 3) 
+        block = atoi(argv[3]);
     if (argc > 4) 
         a = atoi(argv[4]);
     if (argc > 5) 

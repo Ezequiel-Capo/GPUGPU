@@ -58,9 +58,10 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
 
     // ejecutar exclusive scan
-    cub::DeviceScan::ExclusiveSum( d_temp_storage, temp_storage_bytes, d_x, d_y, N);
-
-    CUDA_CHK(cudaDeviceSynchronize());
+    for (int i = 0; i < 10; i++){
+        cub::DeviceScan::ExclusiveSum( d_temp_storage, temp_storage_bytes, d_x, d_y, N);
+        CUDA_CHK(cudaDeviceSynchronize()); //ns si sacarlo afuera
+    }
 
     CUDA_CHK(cudaMemcpy(h_y, d_y, size,cudaMemcpyDeviceToHost));
 

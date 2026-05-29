@@ -29,7 +29,8 @@ int main(int argc, char *argv[]){
     thrust::device_vector<int> d_y(N);
 
     // exclusive scan
-    thrust::exclusive_scan(d_x.begin(), d_x.end(), d_y.begin());
+    for (int i = 0; i < 10; i++)
+        thrust::exclusive_scan(d_x.begin(), d_x.end(), d_y.begin());
 
     // copiar resultado
     thrust::host_vector<int> h_y = d_y;

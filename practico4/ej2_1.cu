@@ -27,7 +27,6 @@ __global__ void kernel_redux_coop_g_labeled(const int* x, int* y, int* label, in
     // Obtiene el grupo cooperativo del bloque actual
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
-
     if (vectorSize >= gid){
         int segmento =  label[gid];
 
@@ -51,7 +50,7 @@ int main(int argc, char *argv[]){
     srand((unsigned int)time(NULL));
 
     int N = (1<<28);//2^28 
-    int cambioLabel = 4; 
+    int cambioLabel = 8; 
     int block = 256; 
     int a = 0;
     int b = 10;
@@ -62,9 +61,9 @@ int main(int argc, char *argv[]){
     if (argc > 2) 
         cambioLabel = atoi(argv[2]);
     if (argc > 3) 
-        block = atoi(argv[3]);
+        v = atoi(argv[3]);
     if (argc > 4) 
-        v = atoi(argv[4]);
+        block = atoi(argv[4]);
     if (argc > 5) 
         a = atoi(argv[5]);
     if (argc > 6) 
@@ -80,7 +79,7 @@ int main(int argc, char *argv[]){
     int * h_vector_labels = (int *)malloc(size);
     int * h_vector_y = (int *)malloc(sizeSeg);
 
-    int label = 0;
+    int label = 0; 
     for (int i = 0; i <  N; i++) {
         h_vector_x[i] = (a + rand() % (b - a + 1)); //naturales de 0 a 10
         h_vector_labels[i] = label; 

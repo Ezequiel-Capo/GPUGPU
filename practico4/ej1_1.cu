@@ -110,7 +110,7 @@ __global__ void add_offsets(int *y,int *block_sums,int N) {
 
 int main(int argc, char *argv[]) {
     srand((unsigned int)time(NULL));
-    int N = 1 << 20;
+    int N = 1 << 10 ;
     int block = 256;
     int v = 0;
     if (argc > 1)
@@ -138,17 +138,19 @@ int main(int argc, char *argv[]) {
     dim3 block_s(block);
     dim3 grid_s(numBlocks);
     // scan parcial por bloque
-    exclusive_scan_block<<<grid_s,block_s,block * sizeof(int)>>>( d_x,d_y,d_block_sums,N);
-    CUDA_CHK(cudaDeviceSynchronize());
-    // scan de sumas de bloques
-    int threads_scan = 1;
-    while (threads_scan < numBlocks)
-        threads_scan *= 2;
-    scan_block_sums<<<1,threads_scan,threads_scan * sizeof(int)>>>(d_block_sums,numBlocks);
-    CUDA_CHK(cudaDeviceSynchronize());
-    // agregar offsets
-    add_offsets<<<grid_s, block_s>>>( d_y,d_block_sums,N);
-    CUDA_CHK(cudaDeviceSynchronize());
+    for (int i = 0; i < 10; i++){ // repetir varias veces para medir tiempo
+        exclusive_scan_block<<<grid_s,block_s,block * sizeof(int)>>>( d_x,d_y,d_block_sums,N);
+        CUDA_CHK(cudaDeviceSynchronize());
+        // scan de sumas de bloques
+        int threads_scan = 1;
+        while (threads_scan < numBlocks)
+            threads_scan *= 2;
+        scan_block_sums<<<1,threads_scan,threads_scan * sizeof(int)>>>(d_block_sums,numBlocks);
+        CUDA_CHK(cudaDeviceSynchronize());
+        // agregar offsets
+        add_offsets<<<grid_s, block_s>>>( d_y,d_block_sums,N);
+        CUDA_CHK(cudaDeviceSynchronize());
+    }
     // copiar resultado
     CUDA_CHK(cudaMemcpy(h_y,d_y,size,cudaMemcpyDeviceToHost));
     // imprimir
