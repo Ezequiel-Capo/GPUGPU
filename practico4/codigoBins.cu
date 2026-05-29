@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include <nvtx3/nvToolsExt.h>
+
 #define K 10
 
 void agrupar_serial(
@@ -12,43 +14,57 @@ void agrupar_serial(
     int **bin_offsets,
     int *num_bins
 ) {
-    int max_bin = 0;
 
-    for (int i = 0; i < N; i++) {
-        int bin = input[i] / K;
-        if (bin > max_bin) {
-            max_bin = bin;
+    bool flag = 0;
+    for (int i = 0; i < 10; i++) {
+        nvtxRangePushA("B_SECUENCIAL");
+        int max_bin = 0;
+
+        for (int i = 0; i < N; i++) {
+            int bin = input[i] / K;
+            if (bin > max_bin) {
+                max_bin = bin;
+            }
         }
+
+        *num_bins = max_bin + 1;
+
+        if (!flag) { //pido memoria una vez
+            flag = 1;
+            *bin_counts = (int *)calloc(*num_bins, sizeof(int));
+            *bin_offsets = (int *)malloc((*num_bins) * sizeof(int));
+        }
+
+
+        for (int i = 0; i < N; i++) {
+            int bin = input[i] / K;
+            (*bin_counts)[bin]++;
+        }
+
+        (*bin_offsets)[0] = 0;
+        for (int b = 1; b < *num_bins; b++) {
+            (*bin_offsets)[b] = (*bin_offsets)[b - 1] + (*bin_counts)[b - 1];
+        }
+
+        int *pos_actual = (int *)malloc((*num_bins) * sizeof(int));
+
+        for (int b = 0; b < *num_bins; b++) {
+            pos_actual[b] = (*bin_offsets)[b];
+        }
+
+        for (int i = 0; i < N; i++) {
+            int bin = input[i] / K;
+            int pos = pos_actual[bin]++;
+            output[pos] = input[i];
+        }
+
+        free(pos_actual);
+        nvtxRangePop();
+
+        for (int b = 0; b < *num_bins; b++) //reinicializo bin_counts para la proxima iteracion
+            (*bin_counts)[b] = 0;
+
     }
-
-    *num_bins = max_bin + 1;
-
-    *bin_counts = (int *)calloc(*num_bins, sizeof(int));
-    *bin_offsets = (int *)malloc((*num_bins) * sizeof(int));
-
-    for (int i = 0; i < N; i++) {
-        int bin = input[i] / K;
-        (*bin_counts)[bin]++;
-    }
-
-    (*bin_offsets)[0] = 0;
-    for (int b = 1; b < *num_bins; b++) {
-        (*bin_offsets)[b] = (*bin_offsets)[b - 1] + (*bin_counts)[b - 1];
-    }
-
-    int *pos_actual = (int *)malloc((*num_bins) * sizeof(int));
-
-    for (int b = 0; b < *num_bins; b++) {
-        pos_actual[b] = (*bin_offsets)[b];
-    }
-
-    for (int i = 0; i < N; i++) {
-        int bin = input[i] / K;
-        int pos = pos_actual[bin]++;
-        output[pos] = input[i];
-    }
-
-    free(pos_actual);
 }
 
 #include <stdio.h>
@@ -168,22 +184,20 @@ int main() {
 
     inicializar_vector(&input, N);
 
-
-
     int *output = (int *)malloc(N * sizeof(int));
     int *bin_counts = NULL;
     int *bin_offsets = NULL;
     int num_bins = 0;
 
-    for (int i = 0; i < 10; i++) {
-        agrupar_serial(
-            input,
-            N,
-            output,
-            &bin_counts,
-            &bin_offsets,
-            &num_bins);
-    }
+    
+    agrupar_serial(
+        input,
+        N,
+        output,
+        &bin_counts,
+        &bin_offsets,
+        &num_bins);
+    
 
 
     imprimir_y_guardar_csv(
