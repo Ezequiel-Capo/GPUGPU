@@ -136,8 +136,50 @@ void agrupar_paralelo(int *h_input, int **h_output, int N, int **h_bin_counts, i
     bool flag2 = 0;
     bool flag3 = 0;
 
+    //WARM UP
+    if (!flag) { //Pido memoria una ve
+        flag = 1;
+        d_input = thrust::device_vector<int>(h_input, h_input + N);
+        d_bins.resize(N); //calloc
+        d_output.resize(N);
+    }
+    thrust::transform(d_input.begin(), d_input.end(), d_bins.begin(), Bin_selector()); //aplica la funcion a cada elemento del vector input y lo guarda en bins
+
+    thrust::copy(d_input.begin(), d_input.end(), d_output.begin()); //pedirlo siempre si no el sort qeda mal
+    
+    // [2,1,0,0] -> [0,0,1,2] && [20,12,7,2] -> [7,2,12,20], stable mantiene orden relativo. ACA no se si hay una func mejor ver luego
+    thrust::stable_sort_by_key(d_bins.begin(), d_bins.end(), d_output.begin()); //ordena bins y reordena output a su vez.
+
+    //ordenadados tomo el último
+    *num_bins = d_bins.back() + 1;// lke sumo 1 empieza de 0. *thrust::max_element(d_input.begin(), d_input.end());
+
+    if (!flag2) {
+        flag2 = 1;
+        d_bin_counts.resize(*num_bins);
+        d_bin_offsets.resize(*num_bins);
+    }
+    //Tengo que contar cuántos elementos hay en cada bin, para eso uso reduce_by_key
+    //input keys -> bins: [0,0,0,0,1,1,2,3]
+    //input values -> [1,1,1,1,1,1,1,1], o bueno 1 constante
+    thrust::constant_iterator<int> val_iter(1);
+    //descarto claves y me quedo con lo que es bin_count
+    thrust::reduce_by_key(d_bins.begin(), d_bins.end(), val_iter, thrust::make_discard_iterator(), d_bin_counts.begin());
+
+    //bin_counts = [4, 2, 1, 1] -> es usar excl sccn
+    //bin_offsets = [0, 4, 6, 7]
+    thrust::exclusive_scan(d_bin_counts.begin(), d_bin_counts.end(), d_bin_offsets.begin());
+
+    if (!flag3) {
+        flag3 = 1;
+        *h_bin_counts = (int *) malloc((*num_bins) * sizeof(int));
+        *h_bin_offsets = (int *) malloc((*num_bins) * sizeof(int));
+    }
+    thrust::copy(d_output.begin(), d_output.end(), *h_output);
+    thrust::copy(d_bin_counts.begin(), d_bin_counts.end(), *h_bin_counts);
+    thrust::copy(d_bin_offsets.begin(), d_bin_offsets.end(), *h_bin_offsets);
+    //FIN WARM UP
     for (int i = 0; i < 10; i++){
-        nvtxRangePushA("B_PARALELO");
+        nvtxRangePushA("B_PARALELO"); //MIDO NSIGHT
 
         if (!flag) { //Pido memoria una ve
             flag = 1;

@@ -24,14 +24,15 @@ __global__ void m_traspose_kernel(float *d_matriz_ini, float *d_matriz_res, int 
      // cargar desde global 
     if (idx_x < N && idx_y < N) { 
         tile[threadIdx.y][threadIdx.x] = d_matriz_ini[idx_y * N + idx_x]; // tile[y][x] = A[y][x]
+        //tile[threadIdx.y][threadIdx.x] = d_matriz_ini[idx_y][idx_x]
         //banco = (fila * ancho_fila + columna) % num_bancos
     }
 
     __syncthreads(); //esperar a que todos los threads hayan cargado su elemento en shared
 
     // transponer índices de bloque
-    int x = blockIdx.y * TILE_DIM + threadIdx.x; // columna destino, 
-    int y = blockIdx.x * TILE_DIM + threadIdx.y; // fila destino
+    int x = blockIdx.y * TILE_DIM + threadIdx.x; // columna destino, // y'
+    int y = blockIdx.x * TILE_DIM + threadIdx.y; // fila destino // x'
 
     // escribir desde shared 
     if (x < N && y < N) {

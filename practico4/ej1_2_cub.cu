@@ -4,6 +4,7 @@
 
 #include <cuda.h>
 #include <cub/cub.cuh>
+#include <nvtx3/nvToolsExt.h>
 
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 
@@ -56,11 +57,15 @@ int main(int argc, char *argv[]) {
 
     // reservar memoria temporal
     CUDA_CHK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
-
+    cub::DeviceScan::ExclusiveSum( d_temp_storage, temp_storage_bytes, d_x, d_y, N);//para overhead de libreria
+    CUDA_CHK(cudaDeviceSynchronize()); //ns si sacarlo afuera
     // ejecutar exclusive scan
     for (int i = 0; i < 10; i++){
+        nvtxRangePush("ESCAN_CUB");
         cub::DeviceScan::ExclusiveSum( d_temp_storage, temp_storage_bytes, d_x, d_y, N);
         CUDA_CHK(cudaDeviceSynchronize()); //ns si sacarlo afuera
+        nvtxRangePop();
+
     }
 
     CUDA_CHK(cudaMemcpy(h_y, d_y, size,cudaMemcpyDeviceToHost));

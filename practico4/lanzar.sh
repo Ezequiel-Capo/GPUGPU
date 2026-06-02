@@ -18,28 +18,30 @@ set -e
 
 exe="$1"
 shift
+run_exe="${exe}_${SLURM_JOB_ID:-$$}"
+trap 'rm -f "$run_exe"' EXIT
 
 case "$exe" in
 	"./ej1_1")
-		nvcc -O2 -arch=sm_75 -o ej1 ej1_1.cu
+		nvcc -O2 -arch=sm_75 -o "$run_exe" ej1_1.cu
 		;;
 	"./ej1_2")
-		nvcc -O2 -arch=sm_75 -o ej1_cub ej1_2_cub.cu
+		nvcc -O2 -arch=sm_75 -o "$run_exe" ej1_2_cub.cu
 		;;
 	"./ej1_3")
-		nvcc -O2 -arch=sm_75 -o ej1_thrust ej1_3_Thrust.cu
+		nvcc -O2 -arch=sm_75 -o "$run_exe" ej1_2_Thrust.cu
 		;;				
 	"./ej2")
-		nvcc -O2 -arch=sm_75 -o ej2 ej2.cu
+		nvcc -O2 -arch=sm_75 -o "$run_exe" ej2.cu
 		;;
 	"./ej2_1")
-		nvcc -O2 -arch=sm_75 -o ej2_1 ej2_1.cu
+		nvcc -O2 -arch=sm_75 -o "$run_exe" ej2_1.cu
 		;;
 	"./ej3")
-		nvcc -O2 -arch=sm_75 -o ej3 ej3.cu
+		nvcc -O2 -arch=sm_75 -o "$run_exe" ej3.cu
 		;;
 	"./codigoBins")
-		nvcc -O2 -arch=sm_75 -o codigoBins codigoBins.cu
+		nvcc -O2 -arch=sm_75 -o "$run_exe" codigoBins.cu
 		;;
 	*)
 		echo "Error: ejecutable no soportado: $exe"
@@ -51,8 +53,8 @@ if [ "$1" = "--nsys" ]; then
     shift
     report_name="$1"
     shift
-    nsys profile --stats=true -o "$report_name" "$exe" "$@"
+    nsys profile --stats=true --force-overwrite=true -o "$report_name" "$run_exe" "$@"
 else
-    "$exe" "$@"
+    "$run_exe" "$@"
 fi
 #sbatch lanzar.sh "./ej1" "secreto.txt"

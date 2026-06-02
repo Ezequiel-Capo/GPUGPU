@@ -94,11 +94,12 @@ int main(int argc, char *argv[])
 
     printf("N: %d, block: %d, grid: %d\n", N, block_s.x, grid_s.x);
 
-    for (int i = 0; i < 10; i++) 
+    for (int i = 0; i < 10; i++) {
         kernel_redux_coop_g<<<grid_s, block_s>>>(d_vector_x, d_vector_y, N);
-    
+        CUDA_CHK(cudaDeviceSynchronize());
+    }
 
-    CUDA_CHK(cudaDeviceSynchronize());
+    
 
     // copiar el de device a host
 	CUDA_CHK(cudaMemcpy(h_vector_y, d_vector_y, sizeSeg, cudaMemcpyDeviceToHost));

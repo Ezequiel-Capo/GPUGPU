@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <time.h>
 #include <cuda.h>
+#include <nvtx3/nvToolsExt.h>
+
 
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 
@@ -108,6 +110,35 @@ __global__ void add_offsets(int *y,int *block_sums,int N) {
         y[gid] += block_sums[blockIdx.x];
 }
 
+void exclusive_scan_device(int *d_x, int *d_y, int N, int block)
+{
+    int numBlocks = (N + block - 1) / block;
+    int *d_block_sums;
+    CUDA_CHK(cudaMalloc((void**)&d_block_sums, numBlocks * sizeof(int)));
+
+    dim3 block_s(block);
+    dim3 grid_s(numBlocks);
+
+    exclusive_scan_block<<<grid_s, block_s, block * sizeof(int)>>>(d_x, d_y, d_block_sums, N);
+    CUDA_CHK(cudaGetLastError());
+    CUDA_CHK(cudaDeviceSynchronize());
+
+    if (numBlocks > 1) {
+        int *d_scanned_block_sums;
+        CUDA_CHK(cudaMalloc((void**)&d_scanned_block_sums, numBlocks * sizeof(int)));
+
+        exclusive_scan_device(d_block_sums, d_scanned_block_sums, numBlocks, block);
+
+        add_offsets<<<grid_s, block_s>>>(d_y, d_scanned_block_sums, N);
+        CUDA_CHK(cudaGetLastError());
+        CUDA_CHK(cudaDeviceSynchronize());
+
+        CUDA_CHK(cudaFree(d_scanned_block_sums));
+    }
+
+    CUDA_CHK(cudaFree(d_block_sums));
+}
+
 int main(int argc, char *argv[]) {
     srand((unsigned int)time(NULL));
     int N = 1 << 10 ;
@@ -119,6 +150,12 @@ int main(int argc, char *argv[]) {
         block = atoi(argv[2]);
     if (argc > 3)
         v = atoi(argv[3]);
+
+    if (block <= 0 || block > 1024 || (block & (block - 1)) != 0) {
+        fprintf(stderr, "Error: block debe ser potencia de 2 y estar entre 1 y 1024\n");
+        return 1;
+    }
+
     int size = N * sizeof(int);
     printf("N = %d\n", N);
     // host
@@ -132,24 +169,13 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMalloc((void**)&d_x, size));
     CUDA_CHK(cudaMalloc((void**)&d_y, size));
     CUDA_CHK(cudaMemcpy(d_x,h_x,size,cudaMemcpyHostToDevice));
-    int numBlocks = (N + block - 1) / block;
-    int *d_block_sums;
-    CUDA_CHK(cudaMalloc((void**)&d_block_sums, numBlocks * sizeof(int)));
-    dim3 block_s(block);
-    dim3 grid_s(numBlocks);
+    exclusive_scan_device(d_x, d_y, N, block);
+
     // scan parcial por bloque
     for (int i = 0; i < 10; i++){ // repetir varias veces para medir tiempo
-        exclusive_scan_block<<<grid_s,block_s,block * sizeof(int)>>>( d_x,d_y,d_block_sums,N);
-        CUDA_CHK(cudaDeviceSynchronize());
-        // scan de sumas de bloques
-        int threads_scan = 1;
-        while (threads_scan < numBlocks)
-            threads_scan *= 2;
-        scan_block_sums<<<1,threads_scan,threads_scan * sizeof(int)>>>(d_block_sums,numBlocks);
-        CUDA_CHK(cudaDeviceSynchronize());
-        // agregar offsets
-        add_offsets<<<grid_s, block_s>>>( d_y,d_block_sums,N);
-        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePush("ESCAN");
+        exclusive_scan_device(d_x, d_y, N, block);
+        nvtxRangePop();
     }
     // copiar resultado
     CUDA_CHK(cudaMemcpy(h_y,d_y,size,cudaMemcpyDeviceToHost));
@@ -169,7 +195,6 @@ int main(int argc, char *argv[]) {
     // liberar
     CUDA_CHK(cudaFree(d_x));
     CUDA_CHK(cudaFree(d_y));
-    CUDA_CHK(cudaFree(d_block_sums));
 
     free(h_x);
     free(h_y);

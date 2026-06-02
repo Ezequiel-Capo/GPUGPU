@@ -1,96 +1,89 @@
 #!/bin/bash
 set -e
 
-K1=$((1<<11))
-K2=$((1<<12))
-K3=$((1<<13))
-K4=$((1<<14))
-K5=$((1<<15))
-K6=$((1<<16))
-K7=$((1<<17))
-K8=$((1<<18))
-K9=$((1<<19))
-K10=$((1<<20))
+K_VALUES=(
+	$((1<<11))
+	$((1<<12))
+	$((1<<13))
+	$((1<<14))
+	$((1<<15))
+	$((1<<16))
+	$((1<<17))
+	$((1<<18))
+	$((1<<19))
+	$((1<<20))
+)
 
+E3_EXTRA_N_VALUES=(
+	10000
+	100000
+	1000000
+	10000000
+)
+
+jobs=()
+
+submit_job() {
+	local out="$1"
+	local err="$2"
+	shift 2
+
+	jobs+=("$(sbatch --parsable --output="$out" --error="$err" --open-mode=truncate lanzar.sh "$@")")
+}
+
+print_time_header() {
+	printf " Time (%%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name\n"
+}
+
+grep_or_notice() {
+	local pattern="$1"
+	local file="$2"
+
+	if ! grep -iE "$pattern" "$file"; then
+		printf "No se encontraron entradas para '%s' en %s\n" "$pattern" "$file"
+	fi
+}
 
 printf "Casos de pruebas, ejecutando\n"
 
-#casos funcionamiento
-#scan manual
-job_e1=$(sbatch --parsable --output=e1.out --error=e1.err --open-mode=truncate lanzar.sh "./ej1" 100 1)
+# Casos funcionamiento
+submit_job "e1.out" "e1.err" "./ej1_1" 100 256 1
+submit_job "e1_2.out" "e1_2.err" "./ej1_2" 100 1
+submit_job "e1_3.out" "e1_3.err" "./ej1_3" 100 1
 
-#scan Cub
-job_e2=$(sbatch --parsable --output=e1_2.out --error=e1_2.err --open-mode=truncate lanzar.sh "./ej1_2" 100 1)
+# Casos ejecucion K = 1,..,10
+for i in "${!K_VALUES[@]}"; do
+	idx=$((i + 1))
+	k_val="${K_VALUES[$i]}"
 
-#scan Thrust
-job_e3=$(sbatch --parsable --output=e1_3.out --error=e1_3.err --open-mode=truncate lanzar.sh "./ej1_3" 100 1)
+	submit_job "e1_k${idx}.out" "e1_k${idx}.err" "./ej1_1" --nsys "scan_manual_k${idx}" "$k_val"
+	submit_job "e1_2_k${idx}.out" "e1_2_k${idx}.err" "./ej1_2" --nsys "scan_cub_k${idx}" "$k_val"
+	submit_job "e1_3_k${idx}.out" "e1_3_k${idx}.err" "./ej1_3" --nsys "scan_thrust_k${idx}" "$k_val"
+done
 
-#casos ejecucion K = 1,..,10 scan a mano
-job_e4=$(sbatch --parsable --output=e1_k1.out --error=e1_k1.err lanzar.sh "./ej1" --nsys scan_k $K1)
-job_e5=$(sbatch --parsable --output=e1_k2.out --error=e1_k2.err lanzar.sh "./ej1" --nsys scan_k $K2)
-job_e6=$(sbatch --parsable --output=e1_k3.out --error=e1_k3.err lanzar.sh "./ej1" --nsys scan_k $K3)
-job_e7=$(sbatch --parsable --output=e1_k4.out --error=e1_k4.err lanzar.sh "./ej1" --nsys scan_k $K4)
-job_e8=$(sbatch --parsable --output=e1_k5.out --error=e1_k5.err lanzar.sh "./ej1" --nsys scan_k $K5)
-job_e9=$(sbatch --parsable --output=e1_k6.out --error=e1_k6.err lanzar.sh "./ej1" --nsys scan_k $K6)
-job_e10=$(sbatch --parsable --output=e1_k7.out --error=e1_k7.err lanzar.sh "./ej1" --nsys scan_k $K7)
-job_e11=$(sbatch --parsable --output=e1_k8.out --error=e1_k8.err lanzar.sh "./ej1" --nsys scan_k $K8)
-job_e12=$(sbatch --parsable --output=e1_k9.out --error=e1_k9.err lanzar.sh "./ej1" --nsys scan_k $K9)
-job_e13=$(sbatch --parsable --output=e1_k10.out --error=e1_k10.err lanzar.sh "./ej1" --nsys scan_k $K10)
+# Cooperative Groups funcionamiento
+submit_job "e2.out" "e2.err" "./ej2" 64 1 64
+submit_job "e2_1.out" "e2_1.err" "./ej2_1" 64 4 1 64
 
-#casos ejecucion K = 1,..,10 scan con cub
-job_e14=$(sbatch --parsable --output=e1_2_k1.out --error=e1_2_k1.err lanzar.sh "./ej1_2" --nsys scan_k $K1)
-job_e15=$(sbatch --parsable --output=e1_2_k2.out --error=e1_2_k2.err lanzar.sh "./ej1_2" --nsys scan_k $K2)
-job_e16=$(sbatch --parsable --output=e1_2_k3.out --error=e1_2_k3.err lanzar.sh "./ej1_2" --nsys scan_k $K3)
-job_e17=$(sbatch --parsable --output=e1_2_k4.out --error=e1_2_k4.err lanzar.sh "./ej1_2" --nsys scan_k $K4)
-job_e18=$(sbatch --parsable --output=e1_2_k5.out --error=e1_2_k5.err lanzar.sh "./ej1_2" --nsys scan_k $K5)
-job_e19=$(sbatch --parsable --output=e1_2_k6.out --error=e1_2_k6.err lanzar.sh "./ej1_2" --nsys scan_k $K6)
-job_e20=$(sbatch --parsable --output=e1_2_k7.out --error=e1_2_k7.err lanzar.sh "./ej1_2" --nsys scan_k $K7)
-job_e21=$(sbatch --parsable --output=e1_2_k8.out --error=e1_2_k8.err lanzar.sh "./ej1_2" --nsys scan_k $K8)
-job_e22=$(sbatch --parsable --output=e1_2_k9.out --error=e1_2_k9.err lanzar.sh "./ej1_2" --nsys scan_k $K9)
-job_e23=$(sbatch --parsable --output=e1_2_k10.out --error=e1_2_k10.err lanzar.sh "./ej1_2" --nsys scan_k $K10)
+# Bins funcionamiento y tiempos
+submit_job "e3.out" "e3.err" "./ej3" 64 1
+submit_job "e3_c.out" "e3_c.err" "./ej3" --nsys "bins_paralelo" 1000 0
+submit_job "e3sec_c.out" "e3sec_c.err" "./codigoBins" --nsys "bins_secuencial" 1000 0
 
-#casos ejecucion K = 1,..,10 scan con Thrust
-job_e24=$(sbatch --parsable --output=e1_3_k1.out --error=e1_3_k1.err lanzar.sh "./ej1_3" --nsys scan_k $K1)
-job_e25=$(sbatch --parsable --output=e1_3_k2.out --error=e1_3_k2.err lanzar.sh "./ej1_3" --nsys scan_k $K2)
-job_e26=$(sbatch --parsable --output=e1_3_k3.out --error=e1_3_k3.err lanzar.sh "./ej1_3" --nsys scan_k $K3)
-job_e27=$(sbatch --parsable --output=e1_3_k4.out --error=e1_3_k4.err lanzar.sh "./ej1_3" --nsys scan_k $K4)
-job_e28=$(sbatch --parsable --output=e1_3_k5.out --error=e1_3_k5.err lanzar.sh "./ej1_3" --nsys scan_k $K5)
-job_e29=$(sbatch --parsable --output=e1_3_k6.out --error=e1_3_k6.err lanzar.sh "./ej1_3" --nsys scan_k $K6)
-job_e30=$(sbatch --parsable --output=e1_3_k7.out --error=e1_3_k7.err lanzar.sh "./ej1_3" --nsys scan_k $K7)
-job_e31=$(sbatch --parsable --output=e1_3_k8.out --error=e1_3_k8.err lanzar.sh "./ej1_3" --nsys scan_k $K8)
-job_e32=$(sbatch --parsable --output=e1_3_k9.out --error=e1_3_k9.err lanzar.sh "./ej1_3" --nsys scan_k $K9)
-job_e33=$(sbatch --parsable --output=e1_3_k10.out --error=e1_3_k10.err lanzar.sh "./ej1_3" --nsys scan_k $K10)
-
-
-#Coop Group funcionamiento
-job_e34=$(sbatch --parsable --output=e2.out --error=e2.err --open-mode=truncate lanzar.sh "./ej2" 64 4 1)
-
-#Coop Group labeled funcionamiento
-job_e35=$(sbatch --parsable --output=e2_1.out --error=e2_1.err --open-mode=truncate lanzar.sh "./ej2_1" 64 4 1)
-
-#Bins funcionamiento
-job_e36=$(sbatch --parsable --output=e3.out --error=e3.err --open-mode=truncate lanzar.sh "./ej3" 1000 1)
-
-#Bins Thrust vs bins secuencial
-job_e38=$(sbatch --parsable --output=e3sec_c.out --error=e3sec_c.err --open-mode=truncate lanzar.sh "./codigoBins" 1000 1)
-
+for n in "${E3_EXTRA_N_VALUES[@]}"; do
+	submit_job "e3_c_${n}.out" "e3_c_${n}.err" "./ej3" --nsys "bins_paralelo_${n}" "$n" 0
+	submit_job "e3sec_c_${n}.out" "e3sec_c_${n}.err" "./codigoBins" --nsys "bins_secuencial_${n}" "$n" 0
+done
 
 printf "Jobs enviados correctamente\n"
 
-for jid in \
-	"$job_e1" "$job_e2" "$job_e3" \
-	"$job_e4" "$job_e5" "$job_e6" "$job_e7" "$job_e8" "$job_e9" "$job_e10" "$job_e11" "$job_e12" "$job_e13" \
-	"$job_e14" "$job_e15" "$job_e16" "$job_e17" "$job_e18" "$job_e19" "$job_e20" "$job_e21" "$job_e22" "$job_e23" \
-	"$job_e24" "$job_e25" "$job_e26" "$job_e27" "$job_e28" "$job_e29" "$job_e30" "$job_e31" "$job_e32" "$job_e33" \
-	"$job_e34" "$job_e35" "$job_e36" "$job_e37" "$job_e38"
-do
+for jid in "${jobs[@]}"; do
 	while squeue -h -j "$jid" | grep -q .; do
 		sleep 1
 	done
 done
 
 printf "Resultados de las pruebas\n"
-
 
 printf "Ejercicio 1: Funcionamiento escan manual\n\n"
 cat e1.out
@@ -104,34 +97,52 @@ printf "Ejercicio 1: Funcionamiento escan Thrust\n\n"
 cat e1_3.out
 printf "\n"
 
+printf "Ejercicio 1: Tiempos de ejecucion =================\n\n"
+for i in "${!K_VALUES[@]}"; do
+	idx=$((i + 1))
+	k_val="${K_VALUES[$i]}"
 
-for i in {1..10}; do
-	k_var="K${i}"
-	k_val=${!k_var}
+	printf "Escan manual, k = %s\n" "$k_val"
 
-	printf "Ejercicio 1: Tiempo ejecucion k = %s\n" "$k_val"
-
-	printf "Escan manual\n"
-	echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
-	grep kernel "e1_k${i}.out"
+	print_time_header
+	grep_or_notice "ESCAN" "e1_k${idx}.out"
 	printf "\n"
 
-	printf "Escan Cub\n"
-	echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
-	grep kernel "e1_2_k${i}.out"
+
+done
+
+for i in "${!K_VALUES[@]}"; do
+	idx=$((i + 1))
+	k_val="${K_VALUES[$i]}"
+
+	printf "Escan Cub, k = %s\n" "$k_val"
+
+	print_time_header
+	grep_or_notice 	"ESCAN_CUB" "e1_2_k${idx}.out"
 	printf "\n"
 
-	printf "Escan Thrust\n"
-	echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
-	grep kernel "e1_3_k${i}.out"
+
+
+done
+
+for i in "${!K_VALUES[@]}"; do
+	idx=$((i + 1))
+	k_val="${K_VALUES[$i]}"
+
+	printf "Escan Thrust, k = %s\n" "$k_val"
+
+	print_time_header
+	grep_or_notice "ESCAN_THRUST" "e1_3_k${idx}.out"
 	printf "\n"
+
+
 done
 
 printf "Ejercicio 2: Cooperative Groups, grupos de 8 por grupo, N = 64\n\n"
 cat e2.out
 printf "\n"
 
-printf "Ejercicio 2: Cooperative Groups Labeled, cambio Label cada 4 elementos, N =64\n\n"
+printf "Ejercicio 2: Cooperative Groups Labeled, cambio Label cada 4 elementos, N = 64\n\n"
 cat e2_1.out
 printf "\n"
 
@@ -140,13 +151,23 @@ cat e3.out
 printf "\n"
 
 printf "Ejercicio 3: Bins Thrust vs Bins Secuencial, N = 1000\n\n"
-echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
-grep B_PARALELO "e3_c.out"
+print_time_header
+grep_or_notice "B_PARALELO" "e3_c.out"
 printf "\n"
 
 printf "Bins secuenciales CodigoBins, N = 1000\n"
-echo " Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                    Name      \n"
-grep B_SECUENCIAL "e3sec_c.out"
-printf "\n"
+print_time_header
+grep_or_notice "B_SECUENCIAL" "e3sec_c.out"
 printf "\n"
 
+for n in "${E3_EXTRA_N_VALUES[@]}"; do
+	printf "Ejercicio 3: Bins Thrust vs Bins Secuencial, N = %s\n\n" "$n"
+	print_time_header
+	grep_or_notice "B_PARALELO" "e3_c_${n}.out"
+	printf "\n"
+
+	printf "Bins secuenciales CodigoBins, N = %s\n" "$n"
+	print_time_header
+	grep_or_notice "B_SECUENCIAL" "e3sec_c_${n}.out"
+	printf "\n"
+done
