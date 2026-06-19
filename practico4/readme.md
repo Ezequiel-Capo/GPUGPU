@@ -25,4 +25,8 @@ sbatch lanzar.sh "./ej" x y ...
 - "./ej" es alguno de los vistos en lanzar.sh
 
 **Aclaración:**
-Se formatea la salida del reporte nsys, para que solo muestre las métricas de ejecución pertinentes
+- Se formatea la salida del reporte nsys, para que solo muestre las métricas de ejecución pertinentes
+- El tiempo de ejecucion de prueba.sh es aproximadamente de 5min, se brindan salidas ya dispuestas en bash salidas.sh, si solo se qieren reiterar resultados
+
+## Formatear .sh
+- sed -i 's/\r$//' *
