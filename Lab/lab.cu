@@ -13,81 +13,70 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
     }
 }
 
-/*
-    Codificación:
-    0 -> 00
-    1 -> 01
-    2 -> 10
-*/
+__inline__ __device__
+int warpReduceSum(int val)
+{
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        val += __shfl_down_sync(0xffffffff, val, offset);
 
-/* -----------------------------
-   Generación pseudo-realista
-   -----------------------------
-   Idea:
-   - frecuencia alélica p aleatoria por SNP
-   - genotipo:
-       0 ~ (1-p)^2
-       1 ~ 2p(1-p)
-       2 ~ p^2
-*/
-
-__host__ uint8_t sample_genotype(float p, float r) {
-    float p0 = (1.0f - p) * (1.0f - p);
-    float p1 = 2.0f * p * (1.0f - p);
-    // p2 = p^2
-
-    if (r < p0) return 0;
-    else if (r < p0 + p1) return 1;
-    else return 2;
+    return val;
 }
 
-/*
-   Empaquetado:
-   4 SNPs por byte (2 bits cada uno)
-*/
+__global__ void CalculateNormVector(uint8_t *matrix, int *norms, int n, int m) {
+    int row = blockIdx.x;
 
-__host__ void generate_genomic_matrix(uint8_t *packed,int n, int m) {
+    if (row >= n)
+        return;
+
+    int local_norm = 0;
+
+    // Cada hilo procesa parte de la fila, tid 0, blockDim.x-1, 2.blockDim.x -1
+    for (int col = threadIdx.x; col < m; col += blockDim.x){
+        int v = matrix[row * m + col];
+        local_norm += v * v;
+    }
+
+    // Reducción dentro del warp
+    local_norm = warpReduceSum(local_norm);
+
+    // Un entero por warp, 1024 / 32 = 32 warps, maximo hilos por bloque = 1024
+    __shared__ int warpSums[32]; 
+
+    int lane   = threadIdx.x & 31; // threadIdx.x % warpSize -> 31 = 2^5 - 1 (todos 1s) 
+    int warpId = threadIdx.x >> 5; // warpId == 0 si threadIdx.x < 32
+
+    if (lane == 0)
+        warpSums[warpId] = local_norm;
+
+    __syncthreads();
+
+    // Primer warp reduce las sumas de los warps
+    if (warpId == 0){
+        int sum = (lane < (blockDim.x / 32)) ? warpSums[lane] : 0; // lane < warps_per_block, pongo warpSums[lane]  
+
+        sum = warpReduceSum(sum); //ultima reduccion, sumo los resultados de los warps
+
+        if (lane == 0)
+            norms[row] = sum;
+    }
+}
+
+
+void generate_genomic_matrix(uint8_t *matrix, int n, int m) {
     srand(42);
 
-    int packed_m = m / 4; // 4 SNPs por byte
-
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < packed_m; j++) {
-
-            uint8_t byte = 0;
-
-            for (int k = 0; k < 4; k++) {
-                int snp_idx = j * 4 + k; //indice de SNP a generar
-
-                uint8_t g = 0;
-
-                if (snp_idx < m) {
-                    float p = (float)rand() / RAND_MAX; // frecuencia alélica
-                    float r = (float)rand() / RAND_MAX; // muestreo
-
-                    g = sample_genotype(p, r);
-                }
-
-                // empaquetar en 2 bits: g & 11, luego desplazar según posición en el byte
-                byte |= (g & 0x3) << (k * 2);
-            }
-
-            packed[i * packed_m + j] = byte;
+        for (int j = 0; j < m; j++) {
+            matrix[i * m + j] = rand() % 3;   // 0,1,2 con igual probabilidad
         }
     }
 }
 
-/* Debug opcional: imprimir matriz decodificada */
-__host__ void print_matrix(uint8_t *packed, int n, int m) {
-    int packed_m = (m + 3) / 4;
 
+void print_matrix(uint8_t *matrix, int n, int m) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
-            int byte = packed[i * packed_m + (j / 4)];
-            int shift = (j % 4) * 2;
-            int val = (byte >> shift) & 0x3;
-
-            printf("%d ", val);
+            printf("%d ", matrix[i * m + j]);
         }
         printf("\n");
     }
@@ -95,20 +84,27 @@ __host__ void print_matrix(uint8_t *packed, int n, int m) {
 
 int main(int argc, char *argv[]) {
 
-    int n = 32;   // individuos
-    int m = 32;  // SNPs
+    int n = (1<<10);   // individuos
+    int m = (1<<15);  // SNPs
 
     if (argc >= 3) {
         n = atoi(argv[1]);
         m = atoi(argv[2]);
     }
 
-    int packed_m = m / 4;
-
-    size_t size = n * packed_m * sizeof(uint8_t);
-
+    //TODO: Implementar memoria a nivel de bits, 1 byte (4 SNPs)
+    size_t size = n * m * sizeof(uint8_t);
     uint8_t *h_matrix = (uint8_t*)malloc(size);
 
+
+    uint8_t *d_matrix;
+    CUDA_CHK(cudaMalloc(&d_matrix, size));
+
+    int *d_norms;
+    CUDA_CHK(cudaMalloc(&d_norms, n * sizeof(int)));
+
+    CalculateNormVector<<<n, 256>>>(d_matrix, d_norms, n, m);
+    CUDA_CHK(cudaGetLastError());
 
     printf("Generando matriz genómica (%d x %d)...\n", n, m);
 
@@ -117,14 +113,7 @@ int main(int argc, char *argv[]) {
     printf("\nMatriz decodificada (debug):\n");
     print_matrix(h_matrix, n, m);
 
-    // /* GPU allocation (placeholder para pipeline futuro) */
-    // uint8_t *d_matrix = nullptr;
-    // CUDA_CHK(cudaMalloc(&d_matrix, size));
-    // CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, size, cudaMemcpyHostToDevice));
 
-    // printf("\nTransferido a GPU correctamente.\n");
-
-    // cudaFree(d_matrix);
     free(h_matrix);
 
     return 0;
