@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=practico2_ej1
+#SBATCH --job-name=lab
 #SBATCH --ntasks=1
 #SBATCH --mem=16G
 #SBATCH --time=00:05:00
@@ -39,4 +39,5 @@ if [ "$1" = "--nsys" ]; then
 else
     "$run_exe" "$@"
 fi
-#sbatch lanzar.sh "./ej1" "secreto.txt"
+#sbatch lanzar.sh "./lab" 
+#sbatch --parsable --output=labWMMA.out --error=labWMMA.err lanzar.sh "./lab" --nsys tensorShared 1024 1048576
