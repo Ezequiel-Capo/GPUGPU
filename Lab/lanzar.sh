@@ -22,8 +22,14 @@ run_exe="${exe}_${SLURM_JOB_ID:-$$}"
 trap 'rm -f "$run_exe"' EXIT
 
 case "$exe" in
-	"./lab")
-		nvcc -O2 -arch=sm_75 -o "$run_exe" lab.cu
+	"./lab_manual_packed")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_manual_packed.cu
+		;;
+    "./lab_wmma")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_i4.cu
+		;;
+    "./lab_wmma")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_i8.cu
 		;;
     *)
 		echo "Error: ejecutable no soportado: $exe"

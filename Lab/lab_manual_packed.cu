@@ -32,6 +32,9 @@
 
 #define SYMRK_BLOCK_X 16
 #define SYMRK_BLOCK_Y 16
+#define TILE_M 16
+#define TILE_N 16
+#define TILE_K 32
 
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 
@@ -47,25 +50,17 @@ static inline int div_up(int a, int b) {
     return (a + b - 1) / b;
 }
 
-__host__ __device__ static inline uint8_t unpack_genotype_from_byte(uint8_t packed_byte,
-                                                                    int offset_in_byte) {
+__host__ __device__ static inline uint8_t unpack_genotype_from_byte(uint8_t packed_byte, int offset_in_byte) {
     return (packed_byte >> (offset_in_byte * BITS_PER_VALUE)) & PACKED_VALUE_MASK;
 }
 
-__host__ __device__ static inline uint8_t get_packed_genotype(const uint8_t *matrix,
-                                                             int packed_cols,
-                                                             int row,
-                                                             int col) {
+__host__ __device__ static inline uint8_t get_packed_genotype(const uint8_t *matrix, int packed_cols, int row, int col) {
     size_t byte_index = (size_t)row * (size_t)packed_cols + (size_t)(col / VALUES_PER_BYTE);
     int offset = col % VALUES_PER_BYTE;
     return unpack_genotype_from_byte(matrix[byte_index], offset);
 }
 
-static inline void set_packed_genotype(uint8_t *matrix,
-                                       int packed_cols,
-                                       int row,
-                                       int col,
-                                       uint8_t value) {
+static inline void set_packed_genotype(uint8_t *matrix, int packed_cols, int row, int col, uint8_t value) {
     size_t byte_index = (size_t)row * (size_t)packed_cols + (size_t)(col / VALUES_PER_BYTE);
     int shift = (col % VALUES_PER_BYTE) * BITS_PER_VALUE;
     uint8_t mask = (uint8_t)(PACKED_VALUE_MASK << shift);
@@ -86,22 +81,6 @@ __device__ static inline int dot4_packed_bytes(uint8_t a_byte, uint8_t b_byte) {
     return acc;
 }
 
-__device__ static inline int partial_dot_packed_bytes(uint8_t a_byte,
-                                                      uint8_t b_byte,
-                                                      int valid_values) {
-    int acc = 0;
-
-#pragma unroll
-    for (int offset = 0; offset < VALUES_PER_BYTE; offset++) {
-        if (offset < valid_values) {
-            int a = unpack_genotype_from_byte(a_byte, offset);
-            int b = unpack_genotype_from_byte(b_byte, offset);
-            acc += a * b;
-        }
-    }
-
-    return acc;
-}
 
 // EUCLIDEAN DISTANCE
 // D^2(i,j) = ||X_i||^2 + ||X_j||^2 - 2 * dot(X_i, X_j)
@@ -115,50 +94,65 @@ __global__ void CalculateDistance(const int32_t *XXT, const int *norms,
 
     if (row < m && col < m && row <= col) {
         int xxt = XXT[(size_t)row * (size_t)m + (size_t)col];
-        distances[(size_t)row * (size_t)m + (size_t)col] =
-            norms[row] + norms[col] - 2 * xxt;
+        distances[(size_t)row * (size_t)m + (size_t)col] = norms[row] + norms[col] - 2 * xxt;
     }
 }
 
 // XXT = X * X^T manual sobre datos empaquetados.
 // Cada hilo calcula una celda del triangulo superior. En cada iteracion lee un
-// byte de la fila row y un byte de la fila col, desempaqueta hasta 4 genotipos
+// byte de la fila row y un byte de la fila col, desempaqueta 4 exclusivamente
 // y acumula sus productos.
-__global__ void SymrkManualPacked(const uint8_t *X,
-                                  int32_t *C,
-                                  int m,
-                                  int n,
-                                  int packed_cols) {
-    int row_base = blockIdx.y * blockDim.y;
-    int col_base = blockIdx.x * blockDim.x;
+__global__ void XXTManualPacked(const uint8_t *X, int32_t *C, int m, int n, int packed_cols)
+{
+    int row_base = blockIdx.y * TILE_M;
+    int col_base = blockIdx.x * TILE_N;
 
-    // Si todo el tile esta bajo la diagonal, todos sus elementos cumplen
-    // col < row. Como solo guardamos triangulo superior, podemos salir.
-    if (col_base + blockDim.x <= row_base) return;
+    if (col_base + TILE_N <= row_base)
+        return;
 
-    int row = row_base + threadIdx.y;
-    int col = col_base + threadIdx.x;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
 
-    if (row >= m || col >= m || row > col) return;
+    int row = row_base + ty;
+    int col = col_base + tx;
 
-    const uint8_t *row_ptr = X + (size_t)row * (size_t)packed_cols;
-    const uint8_t *col_ptr = X + (size_t)col * (size_t)packed_cols;
+    // +1 para evitar bank conflicts
+    __shared__ uint8_t As[TILE_M][TILE_K + 1];
+    __shared__ uint8_t Bs[TILE_N][TILE_K + 1];
+
     int32_t acc = 0;
 
-    for (int byte_col = 0; byte_col < packed_cols; byte_col++) {
-        int base_snp = byte_col * VALUES_PER_BYTE;
-        int remaining = n - base_snp;
-        uint8_t a_byte = row_ptr[byte_col];
-        uint8_t b_byte = col_ptr[byte_col];
+    for (int k0 = 0; k0 < packed_cols; k0 += TILE_K) {
 
-        if (remaining >= VALUES_PER_BYTE) {
-            acc += dot4_packed_bytes(a_byte, b_byte);
-        } else {
-            acc += partial_dot_packed_bytes(a_byte, b_byte, remaining);
+        // Cada hilo carga 2 bytes
+        for (int k = tx; k < TILE_K; k += TILE_N) {
+
+            int idx = k0 + k;
+
+            // Tile A
+            if (row < m && idx < packed_cols)
+                As[ty][k] = X[(size_t)row * packed_cols + idx];
+            else
+                As[ty][k] = 0;
+
+            // Tile B
+            if (col < m && idx < packed_cols)
+                Bs[tx][k] = X[(size_t)col * packed_cols + idx];
+            else
+                Bs[tx][k] = 0;
         }
+
+        __syncthreads();
+
+#pragma unroll
+        for (int k = 0; k < TILE_K; k++)
+            acc += dot4_packed_bytes(As[ty][k], Bs[tx][k]);
+
+        __syncthreads();
     }
 
-    C[(size_t)row * (size_t)m + (size_t)col] = acc;
+    if (row < m && col < m && row <= col)
+        C[(size_t)row * m + col] = acc;
 }
 
 // NORMAS
@@ -175,11 +169,7 @@ __inline__ __device__ int warpReduceSum(int val) {
     return val;
 }
 
-__global__ void CalculateNormVectorPacked(const uint8_t *matrix,
-                                          int *norms,
-                                          int m,
-                                          int n,
-                                          int packed_cols) {
+__global__ void CalculateNormVectorPacked(const uint8_t *matrix, int *norms, int m, int n, int packed_cols) {
     int row = blockIdx.x;
     if (row >= m) return;
 
@@ -187,15 +177,10 @@ __global__ void CalculateNormVectorPacked(const uint8_t *matrix,
     int local_norm = 0;
 
     for (int byte_col = threadIdx.x; byte_col < packed_cols; byte_col += blockDim.x) {
-        int base_snp = byte_col * VALUES_PER_BYTE;
-        int remaining = n - base_snp;
         uint8_t packed_byte = row_ptr[byte_col];
 
-        if (remaining >= VALUES_PER_BYTE) {
-            local_norm += dot4_packed_bytes(packed_byte, packed_byte);
-        } else {
-            local_norm += partial_dot_packed_bytes(packed_byte, packed_byte, remaining);
-        }
+        local_norm += dot4_packed_bytes(packed_byte, packed_byte);
+        
     }
 
     local_norm = warpReduceSum(local_norm);
@@ -241,12 +226,7 @@ void print_matrix_packed_u8(const uint8_t *matrix, int rows, int cols, int packe
     }
 }
 
-bool validate_small_case_packed(const uint8_t *X,
-                                const int32_t *XXT,
-                                const int *norms,
-                                int m,
-                                int n,
-                                int packed_cols) {
+bool validate_small_case_packed(const uint8_t *X, const int32_t *XXT, const int *norms, int m, int n, int packed_cols) {
     // Validacion CPU para casos chicos. Solo revisa el triangulo superior porque
     // esa es la parte que el kernel define como salida valida.
     for (int i = 0; i < m; i++) {
@@ -353,19 +333,19 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
 
     // X*X^T -----------------------------------------------------
-    // SYMRK manual:
+    // XXT manual:
     //   grid.x recorre columnas de C;
     //   grid.y recorre filas de C;
     //   cada hilo calcula un C[row,col] leyendo X empaquetada.
     dim3 block_syrk(SYMRK_BLOCK_X, SYMRK_BLOCK_Y);
     dim3 grid_syrk(div_up(m, block_syrk.x), div_up(m, block_syrk.y));
-    SymrkManualPacked<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n, packed_cols);
+    XXTManualPacked<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n, packed_cols);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
     CUDA_CHK(cudaMemset(d_distances, 0, square_int_bytes));
 
-    printf("SYMRK manual con datos empaquetados finalizado.\n");
+    printf("XXT manual con datos empaquetados finalizado.\n");
 
     // DISTANCIAS EUCLIDEAS -----------------------------------------------------
     dim3 block_dist(16, 16);

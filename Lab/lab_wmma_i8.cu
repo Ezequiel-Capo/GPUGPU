@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include <mma.h>
+#include <nvtx3/nvToolsExt.h>
 
 using namespace nvcuda;
 
@@ -99,13 +100,12 @@ __global__ void CalculateDistance(const int32_t *XXT, const int *norms,
 //
 // B se carga en WMMA como col_major. Eso equivale a usar B^T sin hacer una
 // transposicion explicita: B[j][k] en row-major se ve como B_wmma[k][j].
-__global__ void Symrk_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
+__global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
     int row_base = blockIdx.y * TILE_M;
     int col_base = blockIdx.x * TILE_N;
 
-    // Si todo el tile esta bajo la diagonal, todos sus elementos cumplen
-    // col < row. Como solo guardamos triangulo superior, podemos salir.
+    // col < row. Como solo guardamos triangulo superior
     if (col_base + TILE_N <= row_base) return;
 
     // Un warp completo ejecuta una sola operacion WMMA. warp_id identifica que
@@ -126,19 +126,16 @@ __global__ void Symrk_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
     int subtile_col = col_base + warp_tile_col * WMMA_N;
 
     // Si el subtile completo esta bajo la diagonal, sus 16 columnas quedan antes
-    // de su primera fila. Ese warp no llama a WMMA; igual participa en las
-    // barreras para no desincronizar el bloque.
+    // de su primera fila. Ese warp no llama a WMMA
     bool compute_subtile = (subtile_col + WMMA_N > subtile_row);
 
     // Shared memory:
     //
     // a_tile/b_tile son caches por bloque de los pedazos de X que se reutilizan
     // por todos los warps del tile de salida. El ancho logico es WMMA_K=16, pero
-    // el stride fisico es SHMEM_K para padding/alineacion.
+    // el stride fisico es SHMEM_K por padding.
     //
-    // c_tile recibe los resultados de WMMA antes de escribir a global. Esto
-    // permite que WMMA guarde fragments densos 16x16 y que luego filtremos
-    // bordes y triangulo superior con codigo escalar simple.
+    // c_tile recibe los resultados de WMMA antes de escribir a global. 
     __shared__ __align__(32) uint8_t a_tile[TILE_M][SHMEM_K];
     __shared__ __align__(32) uint8_t b_tile[TILE_N][SHMEM_K];
     __shared__ __align__(32) int32_t c_tile[TILE_M][SHMEM_C_N];
@@ -147,8 +144,7 @@ __global__ void Symrk_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
     wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, unsigned char, wmma::col_major> b_frag;
     wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, int> c_frag;
 
-    // Cada warp mantiene su acumulador en registros/fragments durante todo el
-    // recorrido en k. No se escribe a shared hasta terminar la suma completa.
+.
     wmma::fill_fragment(c_frag, 0);
 
     for (int k0 = 0; k0 < n; k0 += WMMA_K) {
@@ -179,11 +175,10 @@ __global__ void Symrk_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
             b_tile[local_row][local_k] = (b_row < m && global_k < n) ? X[b_row * n + global_k] : 0;
         }
 
-        // Asegura que a_tile y b_tile esten completos antes de que cualquier
-        // warp haga load_matrix_sync.
         __syncthreads();
 
         if (compute_subtile) {
+            // Cada warp carga su subtile 16x16 de A y B desde shared memory y ejecuta WMMA.
             const uint8_t *a_ptr = &a_tile[warp_tile_row * WMMA_M][0];
             const uint8_t *b_ptr = &b_tile[warp_tile_col * WMMA_N][0];
 
@@ -194,6 +189,7 @@ __global__ void Symrk_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
         __syncthreads();
     }
 
+    // Cada warp almacena su subtile 16x16 de C en shared memory.
     if (compute_subtile) {
         int local_row = warp_tile_row * WMMA_M;
         int local_col = warp_tile_col * WMMA_N;
@@ -202,6 +198,7 @@ __global__ void Symrk_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
     __syncthreads();
 
+    // Cada hilo del bloque escribe su parte de C desde shared memory a global.
     for (int idx = threadIdx.x; idx < TILE_M * TILE_N; idx += blockDim.x) {
         int local_row = idx / TILE_N;
         int local_col = idx % TILE_N;
@@ -362,7 +359,7 @@ int main(int argc, char *argv[]) {
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
     generate_genomic_matrix(h_matrix, m, n);
 
-
+    //WARM UP:
     CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
     if (m <= 64 && n <= 128) {
         printf("\nX (debug):\n");
@@ -393,14 +390,56 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMemset(d_distances, 0, square_i32_bytes));
 
     printf("SYMRK con tensor cores finalizado\n");
- 
+
     // DISTANCIAS EUCLIDEAS -----------------------------------------------------
     dim3 block_dist(16, 16);
     dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
     CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
+    for (int i = 0; i < 10; i++) {
+        CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
+        if (m <= 64 && n <= 128) {
+            printf("\nX (debug):\n");
+            print_matrix_u8(h_matrix, m, n);
+        }
 
+        // NORMAS -----------------------------------------------------
+        dim3 block_norms(256);
+        dim3 grid_norms(m);
+        nvtxRangePushA("Norms");
+        CalculateNormVector<<<grid_norms, block_norms>>>(d_matrix, d_norms, m, n);
+        CUDA_CHK(cudaGetLastError());
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop();
+
+        printf("Normas finalizado.\n");
+        CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
+
+        // X*X^T -----------------------------------------------------
+        // XXT:
+        //   grid.x recorre columnas de C en bloques TILE_N;
+        //   grid.y recorre filas de C en bloques TILE_M;
+        //   block.x tiene WARPS_PER_BLOCK warps, uno por subtile WMMA 16x16.
+        dim3 block_syrk(THREADS_PER_BLOCK);
+        dim3 grid_syrk(div_up(m, TILE_N), div_up(m, TILE_M));
+        nvtxRangePushA("XXT");
+        XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
+        CUDA_CHK(cudaGetLastError());
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop();
+
+        printf("XXT con tensor cores finalizado\n");
+        CUDA_CHK(cudaMemset(d_distances, 0, square_i32_bytes));
+        // DISTANCIAS EUCLIDEAS -----------------------------------------------------
+        dim3 block_dist(16, 16);
+        dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
+        nvtxRangePushA("CalculateDistance");
+        CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
+        CUDA_CHK(cudaGetLastError());
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop(); 
+    }
     //DEBUGS, casos pequeños
     if (m <= 64 && n <= 1024) {
         int *h_norms = (int*)malloc((size_t)m * sizeof(int));
