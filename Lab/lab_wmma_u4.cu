@@ -7,23 +7,26 @@
 
 using namespace nvcuda;
 
-// Convencion de dimensiones para int4:
-//   La configuracion mandatoria de hardware para int4 es 8x8x32.
-//   M = 8, N = 8, K = 32 (elementos logicos).
-//   Como cada elemento es de 4 bits, 32 elementos ocupan 16 bytes fisicos.
+// Dimensiones obligatorias para usar la API WMMA en u4: M=8, N=8, K=32
 #define WARP_TILE_M 2
 #define WARP_TILE_N 2
 #define WMMA_M 8
 #define WMMA_N 8
 #define WMMA_K 32
 #define WARP_SIZE 32
-#define TILE_M (WARP_TILE_M * WMMA_M)
-#define TILE_N (WARP_TILE_N * WMMA_N)
+#define TILE_M (WARP_TILE_M * WMMA_M)       // Sigue siendo 16
+#define TILE_N (WARP_TILE_N * WMMA_N)       // Sigue siendo 16
 #define WARPS_PER_BLOCK (WARP_TILE_M * WARP_TILE_N)
 #define THREADS_PER_BLOCK (WARPS_PER_BLOCK * WARP_SIZE)
 
-// K requiere 32 elementos logicos, que equivalen a 16 bytes fisicos en Shared Memory.
+// K requiere 32 elementos lógicos, que equivalen a 16 bytes físicos
 #define SHMEM_K_BYTES 16
+
+// Padding para evitar Bank Conflicts
+#define PAD_K_BYTES 16
+#define SHMEM_STRIDE_BYTES (SHMEM_K_BYTES + PAD_K_BYTES)
+#define SHMEM_STRIDE_ELEMENTS (SHMEM_STRIDE_BYTES * 2) 
+
 #define SHMEM_C_N (TILE_N + 8)
 
 #if (WARP_TILE_M < 1) || (WARP_TILE_N < 1)
@@ -34,20 +37,11 @@ using namespace nvcuda;
 #error "Demasiados warps por bloque: THREADS_PER_BLOCK no puede superar 1024."
 #endif
 
-#if (SHMEM_K_BYTES * 2) < WMMA_K
-#error "SHMEM_K_BYTES en elementos debe ser al menos WMMA_K."
-#endif
-
-#if SHMEM_C_N < TILE_N
-#error "SHMEM_C_N debe ser al menos TILE_N."
-#endif
-
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true) {
     if (code != cudaSuccess) {
-        fprintf(stderr, "GPUassert: %s %s %d\n",
-                cudaGetErrorString(code), file, line);
+        fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
         if (abort) exit(code);
     }
 }
@@ -56,9 +50,8 @@ static inline int div_up(int a, int b) {
     return (a + b - 1) / b;
 }
 
-// EUCLIDEAN DISTANCE (Se mantiene igual, opera sobre int32_t)
-__global__ void CalculateDistance(const int32_t *XXT, const int *norms,
-                                  int *distances, int m) {
+// EUCLIDEAN DISTANCE
+__global__ void CalculateDistance(const int32_t *XXT, const int *norms, int *distances, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -68,16 +61,14 @@ __global__ void CalculateDistance(const int32_t *XXT, const int *norms,
     }
 }
 
-// XXT = X * X^T usando Tensor Cores de 4 bits (int4).
+// XXT = X * X^T usando Tensor Cores de 4 bits (u4).
 __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
-
     int row_base = blockIdx.y * TILE_M;
     int col_base = blockIdx.x * TILE_N;
 
     if (col_base + TILE_N <= row_base) return;
 
     int warp_id = threadIdx.x / WARP_SIZE;
-
     int warp_tile_row = warp_id / WARP_TILE_N;
     int warp_tile_col = warp_id % WARP_TILE_N;
 
@@ -86,38 +77,39 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
     bool compute_subtile = (subtile_col + WMMA_N > subtile_row);
 
-    // Memoria compartida dimensionada en BYTES fisicos para la dimension K
-    __shared__ __align__(32) uint8_t a_tile[TILE_M][SHMEM_K_BYTES];
-    __shared__ __align__(32) uint8_t b_tile[TILE_N][SHMEM_K_BYTES];
+    // Memoria compartida con PADDING aplicado en la dimensión de los bytes (stride)
+    __shared__ __align__(32) uint8_t a_tile[TILE_M][SHMEM_STRIDE_BYTES];
+    __shared__ __align__(32) uint8_t b_tile[TILE_N][SHMEM_STRIDE_BYTES];
     __shared__ __align__(32) int32_t c_tile[TILE_M][SHMEM_C_N];
 
-    // Uso del namespace experimental para precision s4 (signed 4-bit)
-    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::experimental::precision::s4, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::experimental::precision::s4, wmma::col_major> b_frag;
+    // Uso del namespace experimental para precisión u4 (unsigned 4-bit)
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::experimental::precision::u4, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::experimental::precision::u4, wmma::col_major> b_frag;
     wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, int32_t> c_frag;
 
     wmma::fill_fragment(c_frag, 0);
 
-    int n_bytes = n / 2; // Cantidad fisica de bytes por fila en la memoria global
+    int n_bytes = n / 2; 
 
-    // k0 avanza de a WMMA_K (32 elementos logicos por iteracion)
+    // k0 avanza de a WMMA_K (64 elementos lógicos por iteración = 32 bytes)
     for (int k0 = 0; k0 < n; k0 += WMMA_K) {
+        int k0_bytes = k0 / 2;
         
-        // Carga cooperativa de A (Copia directa de bytes)
+        // Carga cooperativa de A (Copia directa de bytes hasta SHMEM_K_BYTES)
         for (int idx = threadIdx.x; idx < TILE_M * SHMEM_K_BYTES; idx += blockDim.x) {
             int local_row = idx / SHMEM_K_BYTES;
             int local_k_byte = idx % SHMEM_K_BYTES;
-            int global_k_byte = (k0 / 2) + local_k_byte;
+            int global_k_byte = k0_bytes + local_k_byte;
             int a_row = row_base + local_row;
 
             a_tile[local_row][local_k_byte] = (a_row < m && global_k_byte < n_bytes) ? X[a_row * n_bytes + global_k_byte] : 0;
         }
 
-        // Carga cooperativa de B (Copia directa de bytes)
+        // Carga cooperativa de B (Copia directa de bytes hasta SHMEM_K_BYTES)
         for (int idx = threadIdx.x; idx < TILE_N * SHMEM_K_BYTES; idx += blockDim.x) {
             int local_row = idx / SHMEM_K_BYTES;
             int local_k_byte = idx % SHMEM_K_BYTES;
-            int global_k_byte = (k0 / 2) + local_k_byte;
+            int global_k_byte = k0_bytes + local_k_byte;
             int b_row = col_base + local_row;
 
             b_tile[local_row][local_k_byte] = (b_row < m && global_k_byte < n_bytes) ? X[b_row * n_bytes + global_k_byte] : 0;
@@ -129,9 +121,10 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
             const uint8_t *a_ptr = &a_tile[warp_tile_row * WMMA_M][0];
             const uint8_t *b_ptr = &b_tile[warp_tile_col * WMMA_N][0];
 
-            // IMPORTANTE: El stride para load_matrix_sync se define en ELEMENTOS logicos (SHMEM_K_BYTES * 2 = 32)
-            wmma::load_matrix_sync(a_frag, a_ptr, SHMEM_K_BYTES * 2);
-            wmma::load_matrix_sync(b_frag, b_ptr, SHMEM_K_BYTES * 2);
+            // IMPORTANTE: El stride se pasa en ELEMENTOS lógicos (SHMEM_STRIDE_ELEMENTS)
+            // Esto le indica a la API que hay padding físico al final de cada fila.
+            wmma::load_matrix_sync(a_frag, a_ptr, SHMEM_STRIDE_ELEMENTS);
+            wmma::load_matrix_sync(b_frag, b_ptr, SHMEM_STRIDE_ELEMENTS);
             wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
         __syncthreads();
@@ -163,7 +156,7 @@ __inline__ __device__ int warpReduceSum(int val) {
     return val;
 }
 
-// Modificado para desempaquetar int4 al calcular las normas
+// Cálculo de normas (se mantiene igual, ya está optimizado para desempaquetar)
 __global__ void CalculateNormVector(const uint8_t *matrix, int *norms, int m, int n) {
     int row = blockIdx.x;
     if (row >= m) return;
@@ -174,7 +167,6 @@ __global__ void CalculateNormVector(const uint8_t *matrix, int *norms, int m, in
     for (int col_byte = threadIdx.x; col_byte < n_bytes; col_byte += blockDim.x) {
         uint8_t byte = matrix[row * n_bytes + col_byte];
         
-        // Desempaquetamos los dos valores de 4 bits del byte
         int v0 = byte & 0x0F;
         int v1 = (byte >> 4) & 0x0F;
         
@@ -188,19 +180,18 @@ __global__ void CalculateNormVector(const uint8_t *matrix, int *norms, int m, in
     int warp_id = threadIdx.x >> 5;
     int warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
 
-    if (lane == 0)
-        warp_sums[warp_id] = local_norm;
+    if (lane == 0) warp_sums[warp_id] = local_norm;
 
     __syncthreads();
 
     if (warp_id == 0) {
         int sum = (lane < warps_per_block) ? warp_sums[lane] : 0;
         sum = warpReduceSum(sum);
-
-        if (lane == 0)
-            norms[row] = sum;
+        if (lane == 0) norms[row] = sum;
     }
 }
+
+// ... (Las funciones generate_genomic_matrix_packed, print_matrix_packed_u8, validate_small_case, print_matrix_i32 y el main() se mantienen idénticas, ya que la lógica de host y validación era correcta).
 
 // Genera datos sinteticos empaquetando dos elementos de 4 bits por byte
 void generate_genomic_matrix_packed(uint8_t *matrix, int m, int n) {
@@ -390,7 +381,7 @@ int main(int argc, char *argv[]) {
         printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
 
         int *h_distances = (int*)malloc(square_i32_bytes);
-        fprintf(stderr, "Distancias euclideas al cuadrado (debug):\n");
+        fprintf(stderr, "\nDistancias euclideas al cuadrado (debug):\n");
         CUDA_CHK(cudaMemcpy(h_distances, d_distances, square_i32_bytes, cudaMemcpyDeviceToHost));
         print_matrix_i32(h_distances, m, m);
 

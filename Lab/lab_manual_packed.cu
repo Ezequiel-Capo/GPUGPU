@@ -102,11 +102,13 @@ __global__ void CalculateDistance(const int32_t *XXT, const int *norms,
 // Cada hilo calcula una celda del triangulo superior. En cada iteracion lee un
 // byte de la fila row y un byte de la fila col, desempaqueta 4 exclusivamente
 // y acumula sus productos.
+// XXT = X * X^T manual sobre datos empaquetados.
 __global__ void XXTManualPacked(const uint8_t *X, int32_t *C, int m, int n, int packed_cols)
 {
     int row_base = blockIdx.y * TILE_M;
     int col_base = blockIdx.x * TILE_N;
 
+    // Saltar los tiles estrictamente debajo de la diagonal principal
     if (col_base + TILE_N <= row_base)
         return;
 
@@ -129,28 +131,33 @@ __global__ void XXTManualPacked(const uint8_t *X, int32_t *C, int m, int n, int 
 
             int idx = k0 + k;
 
-            // Tile A
+            // Tile A: usa 'ty' para la fila y 'k' (derivado de tx) para la columna
             if (row < m && idx < packed_cols)
                 As[ty][k] = X[(size_t)row * packed_cols + idx];
             else
                 As[ty][k] = 0;
 
-            // Tile B
-            if (col < m && idx < packed_cols)
-                Bs[tx][k] = X[(size_t)col * packed_cols + idx];
+            // Tile B: CORRECCIÓN AQUÍ
+            // Usamos 'ty' para iterar cooperativamente sobre las filas del Tile B,
+            // garantizando que se cargue la cuadrícula completa de 16x32.
+            int b_row = col_base + ty;
+            
+            if (b_row < m && idx < packed_cols)
+                Bs[ty][k] = X[(size_t)b_row * packed_cols + idx];
             else
-                Bs[tx][k] = 0;
+                Bs[ty][k] = 0;
         }
 
         __syncthreads();
 
-#pragma unroll
+    #pragma unroll
         for (int k = 0; k < TILE_K; k++)
             acc += dot4_packed_bytes(As[ty][k], Bs[tx][k]);
 
         __syncthreads();
     }
 
+    // Escribir solo el triángulo superior
     if (row < m && col < m && row <= col)
         C[(size_t)row * m + col] = acc;
 }
@@ -311,8 +318,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMalloc(&d_distances, square_int_bytes));
 
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
-    printf("Formato empaquetado: %d bytes por fila, %zu bytes total (sin empaquetar: %zu bytes).\n",
-           packed_cols, packed_matrix_bytes, unpacked_matrix_bytes);
+    printf("Formato empaquetado: %d bytes por fila, %zu bytes total (sin empaquetar: %zu bytes).\n",packed_cols, packed_matrix_bytes, unpacked_matrix_bytes);
     generate_genomic_matrix_packed(h_matrix, m, n, packed_cols);
 
     CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, packed_matrix_bytes, cudaMemcpyHostToDevice));
@@ -384,7 +390,7 @@ int main(int argc, char *argv[]) {
         if (!h_distances) {
             fprintf(stderr, "No hay memoria de host para validar distancias.\n");
         } else {
-            fprintf(stderr, "Distancias euclideas al cuadrado (debug):\n");
+            fprintf(stderr, "\nDistancias euclideas al cuadrado (debug):\n");
             CUDA_CHK(cudaMemcpy(h_distances, d_distances, square_int_bytes, cudaMemcpyDeviceToHost));
             print_matrix_i32((const int32_t*)h_distances, m, m);
         }

@@ -25,11 +25,11 @@ case "$exe" in
 	"./lab_manual_packed")
 		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_manual_packed.cu
 		;;
-    "./lab_wmma")
-		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_i4.cu
+    "./lab_wmma_u4")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_u4.cu
 		;;
-    "./lab_wmma")
-		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_i8.cu
+    "./lab_wmma_u8")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_u8.cu
 		;;
     *)
 		echo "Error: ejecutable no soportado: $exe"

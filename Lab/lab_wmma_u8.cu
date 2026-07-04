@@ -144,7 +144,6 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
     wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, unsigned char, wmma::col_major> b_frag;
     wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, int> c_frag;
 
-.
     wmma::fill_fragment(c_frag, 0);
 
     for (int k0 = 0; k0 < n; k0 += WMMA_K) {
@@ -383,13 +382,13 @@ int main(int argc, char *argv[]) {
     //   block.x tiene WARPS_PER_BLOCK warps, uno por subtile WMMA 16x16.
     dim3 block_syrk(THREADS_PER_BLOCK);
     dim3 grid_syrk(div_up(m, TILE_N), div_up(m, TILE_M));
-    Symrk_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
+    XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
     CUDA_CHK(cudaMemset(d_distances, 0, square_i32_bytes));
 
-    printf("SYMRK con tensor cores finalizado\n");
+    printf("SYRK con tensor cores finalizado\n");
 
     // DISTANCIAS EUCLIDEAS -----------------------------------------------------
     dim3 block_dist(16, 16);
@@ -467,7 +466,7 @@ int main(int argc, char *argv[]) {
         if (!h_distances) {
             fprintf(stderr, "No hay memoria de host para validar distancias.\n");
         } else {
-            fprintf(stderr, "Distancias euclideas al cuadrado (debug):\n");
+            fprintf(stderr, "\nDistancias euclideas al cuadrado (debug):\n");
             CUDA_CHK(cudaMemcpy(h_distances, d_distances, square_i32_bytes, cudaMemcpyDeviceToHost));
             print_matrix_i32(h_distances, m, m);
         }
