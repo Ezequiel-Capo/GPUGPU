@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <cuda_runtime.h>
+#include <nvtx3/nvToolsExt.h>
 
 // Convencion de dimensiones:
 //   X tiene forma m x n
@@ -20,11 +21,6 @@
 //     bits 3:2 -> SNP 4*b + 1
 //     bits 5:4 -> SNP 4*b + 2
 //     bits 7:6 -> SNP 4*b + 3
-//
-// SYMRK manual:
-//   C = X * X^T, solo triangulo superior.
-//   Un hilo calcula un elemento C[row,col] y recorre la fila empaquetada.
-//   No usa WMMA ni Tensor Cores.
 
 #define VALUES_PER_BYTE 4
 #define BITS_PER_VALUE 2
@@ -68,25 +64,17 @@ static inline void set_packed_genotype(uint8_t *matrix, int packed_cols, int row
     matrix[byte_index] = (uint8_t)((matrix[byte_index] & ~mask) | encoded);
 }
 
-__device__ static inline int dot4_packed_bytes(uint8_t a_byte, uint8_t b_byte) {
-    int acc = 0;
-
-#pragma unroll
-    for (int offset = 0; offset < VALUES_PER_BYTE; offset++) {
-        int a = unpack_genotype_from_byte(a_byte, offset);
-        int b = unpack_genotype_from_byte(b_byte, offset);
-        acc += a * b;
-    }
-
-    return acc;
+// Convierte 1 byte (4 genotipos de 2 bits) en un entero de 32 bits (4 componentes de 8 bits) listo para __dp4a
+__host__ __device__ static inline int unpack_2bit_to_4x8(uint8_t packed_byte) {
+    int g0 = packed_byte & 0x03u;
+    int g1 = (packed_byte >> 2) & 0x03u;
+    int g2 = (packed_byte >> 4) & 0x03u;
+    int g3 = (packed_byte >> 6) & 0x03u;
+    return g0 | (g1 << 8) | (g2 << 16) | (g3 << 24);
 }
-
 
 // EUCLIDEAN DISTANCE
 // D^2(i,j) = ||X_i||^2 + ||X_j||^2 - 2 * dot(X_i, X_j)
-// XXT ya contiene dot(X_i, X_j). Como las distancias tambien son simetricas,
-// solo escribimos row <= col. d_distances se inicializa con cudaMemset, asi que
-// el triangulo inferior queda en cero.
 __global__ void CalculateDistance(const int32_t *XXT, const int *norms,
                                   int *distances, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -98,11 +86,7 @@ __global__ void CalculateDistance(const int32_t *XXT, const int *norms,
     }
 }
 
-// XXT = X * X^T manual sobre datos empaquetados.
-// Cada hilo calcula una celda del triangulo superior. En cada iteracion lee un
-// byte de la fila row y un byte de la fila col, desempaqueta 4 exclusivamente
-// y acumula sus productos.
-// XXT = X * X^T manual sobre datos empaquetados.
+// XXT = X * X^T manual sobre datos empaquetados usando __dp4a intrínseco.
 __global__ void XXTManualPacked(const uint8_t *X, int32_t *C, int m, int n, int packed_cols)
 {
     int row_base = blockIdx.y * TILE_M;
@@ -118,32 +102,29 @@ __global__ void XXTManualPacked(const uint8_t *X, int32_t *C, int m, int n, int 
     int row = row_base + ty;
     int col = col_base + tx;
 
-    // +1 para evitar bank conflicts
-    __shared__ uint8_t As[TILE_M][TILE_K + 1];
-    __shared__ uint8_t Bs[TILE_N][TILE_K + 1];
+    // Se cambia a 'int' (32 bits). El +1 evita Bank Conflicts perfectamente al mapear palabras completas.
+    __shared__ int As[TILE_M][TILE_K + 1];
+    __shared__ int Bs[TILE_N][TILE_K + 1];
 
     int32_t acc = 0;
 
     for (int k0 = 0; k0 < packed_cols; k0 += TILE_K) {
-
-        // Cada hilo carga 2 bytes
+        // Cada hilo carga y expande simultáneamente a memoria compartida
         for (int k = tx; k < TILE_K; k += TILE_N) {
 
             int idx = k0 + k;
 
-            // Tile A: usa 'ty' para la fila y 'k' (derivado de tx) para la columna
+            // Tile A: Desempaquetado al vuelo durante la carga
             if (row < m && idx < packed_cols)
-                As[ty][k] = X[(size_t)row * packed_cols + idx];
+                As[ty][k] = unpack_2bit_to_4x8(X[(size_t)row * packed_cols + idx]);
             else
                 As[ty][k] = 0;
 
-            // Tile B: CORRECCIÓN AQUÍ
-            // Usamos 'ty' para iterar cooperativamente sobre las filas del Tile B,
-            // garantizando que se cargue la cuadrícula completa de 16x32.
+            // Tile B: Desempaquetado al vuelo durante la carga
             int b_row = col_base + ty;
             
             if (b_row < m && idx < packed_cols)
-                Bs[ty][k] = X[(size_t)b_row * packed_cols + idx];
+                Bs[ty][k] = unpack_2bit_to_4x8(X[(size_t)b_row * packed_cols + idx]);
             else
                 Bs[ty][k] = 0;
         }
@@ -151,8 +132,10 @@ __global__ void XXTManualPacked(const uint8_t *X, int32_t *C, int m, int n, int 
         __syncthreads();
 
     #pragma unroll
-        for (int k = 0; k < TILE_K; k++)
-            acc += dot4_packed_bytes(As[ty][k], Bs[tx][k]);
+        for (int k = 0; k < TILE_K; k++) {
+            // El hardware calcula los 4 productos internos y los acumula en una sola instrucción
+            acc = __dp4a(As[ty][k], Bs[tx][k], acc);
+        }
 
         __syncthreads();
     }
@@ -162,14 +145,7 @@ __global__ void XXTManualPacked(const uint8_t *X, int32_t *C, int m, int n, int 
         C[(size_t)row * m + col] = acc;
 }
 
-// NORMAS
-// norms[row] = ||X[row,*]||^2 = sum_k X[row,k]^2
-//
-// Cada bloque calcula una fila de X empaquetada. Los hilos recorren bytes con
-// stride blockDim.x, suman hasta 4 cuadrados por byte, y luego reducen:
-//   1. dentro de cada warp con shuffle instructions;
-//   2. entre warps usando shared memory;
-//   3. el lane 0 del warp 0 escribe el resultado final.
+// NORMAS OPTIMIZADAS CON __dp4a
 __inline__ __device__ int warpReduceSum(int val) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1)
         val += __shfl_down_sync(0xffffffff, val, offset);
@@ -185,14 +161,14 @@ __global__ void CalculateNormVectorPacked(const uint8_t *matrix, int *norms, int
 
     for (int byte_col = threadIdx.x; byte_col < packed_cols; byte_col += blockDim.x) {
         uint8_t packed_byte = row_ptr[byte_col];
-
-        local_norm += dot4_packed_bytes(packed_byte, packed_byte);
         
+        // Convertimos el byte e incrementamos la norma con __dp4a
+        int unpacked = unpack_2bit_to_4x8(packed_byte);
+        local_norm = __dp4a(unpacked, unpacked, local_norm);
     }
 
     local_norm = warpReduceSum(local_norm);
 
-    // Maximo 1024 hilos por bloque => maximo 32 warps.
     __shared__ int warp_sums[32];
     int lane = threadIdx.x & 31;
     int warp_id = threadIdx.x >> 5;
@@ -216,7 +192,6 @@ void generate_genomic_matrix_packed(uint8_t *matrix, int m, int n, int packed_co
     srand(42);
     memset(matrix, 0, (size_t)m * (size_t)packed_cols * sizeof(uint8_t));
 
-    // Datos sinteticos: cada genotipo toma valores 0, 1 o 2 y ocupa 2 bits.
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < n; j++) {
             set_packed_genotype(matrix, packed_cols, i, j, (uint8_t)(rand() % 3));
@@ -234,36 +209,34 @@ void print_matrix_packed_u8(const uint8_t *matrix, int rows, int cols, int packe
 }
 
 bool validate_small_case_packed(const uint8_t *X, const int32_t *XXT, const int *norms, int m, int n, int packed_cols) {
-    // Validacion CPU para casos chicos. Solo revisa el triangulo superior porque
-    // esa es la parte que el kernel define como salida valida.
-    for (int i = 0; i < m; i++) {
-        int ref_norm = 0;
-        for (int k = 0; k < n; k++) {
-            int v = get_packed_genotype(X, packed_cols, i, k);
-            ref_norm += v * v;
-        }
-
-        if (norms[i] != ref_norm) {
-            printf("Error norma fila %d: GPU=%d CPU=%d\n", i, norms[i], ref_norm);
-            return false;
-        }
-
-        for (int j = i; j < m; j++) {
-            int32_t ref = 0;
+    for (int i = 0; i < i; i++) { /* Corrección semántica loop interna de validación */ }
+        for (int i = 0; i < m; i++) {
+            int ref_norm = 0;
             for (int k = 0; k < n; k++) {
-                int a = get_packed_genotype(X, packed_cols, i, k);
-                int b = get_packed_genotype(X, packed_cols, j, k);
-                ref += (int32_t)a * (int32_t)b;
+                int v = get_packed_genotype(X, packed_cols, i, k);
+                ref_norm += v * v;
             }
 
-            if (XXT[(size_t)i * (size_t)m + (size_t)j] != ref) {
-                printf("Error XXT(%d,%d): GPU=%d CPU=%d\n",
-                       i, j, XXT[(size_t)i * (size_t)m + (size_t)j], ref);
+            if (norms[i] != ref_norm) {
+                printf("Error norma fila %d: GPU=%d CPU=%d\n", i, norms[i], ref_norm);
                 return false;
             }
-        }
-    }
 
+            for (int j = i; j < m; j++) {
+                int32_t ref = 0;
+                for (int k = 0; k < n; k++) {
+                    int a = get_packed_genotype(X, packed_cols, i, k);
+                    int b = get_packed_genotype(X, packed_cols, j, k);
+                    ref += (int32_t)a * (int32_t)b;
+                }
+
+                if (XXT[(size_t)i * (size_t)m + (size_t)j] != ref) {
+                    printf("Error XXT(%d,%d): GPU=%d CPU=%d\n",
+                        i, j, XXT[(size_t)i * (size_t)m + (size_t)j], ref);
+                    return false;
+                }
+            }
+    }
     return true;
 }
 
@@ -301,7 +274,6 @@ int main(int argc, char *argv[]) {
 
     if (!h_matrix) {
         fprintf(stderr, "No hay memoria de host suficiente.\n");
-        free(h_matrix);
         return 1;
     }
 
@@ -310,15 +282,13 @@ int main(int argc, char *argv[]) {
     int32_t *d_XXT = NULL;
     int *d_distances = NULL;
 
-    // Device: d_XXT y d_distances se reservan como m x m completas.
-    // Solo se define el triangulo superior.
     CUDA_CHK(cudaMalloc(&d_matrix, packed_matrix_bytes));
     CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(int)));
     CUDA_CHK(cudaMalloc(&d_XXT, square_i32_bytes));
     CUDA_CHK(cudaMalloc(&d_distances, square_int_bytes));
 
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
-    printf("Formato empaquetado: %d bytes por fila, %zu bytes total (sin empaquetar: %zu bytes).\n",packed_cols, packed_matrix_bytes, unpacked_matrix_bytes);
+    printf("Formato empaquetado: %d bytes por fila, %zu bytes total (sin empaquetar: %zu bytes).\n", packed_cols, packed_matrix_bytes, unpacked_matrix_bytes);
     generate_genomic_matrix_packed(h_matrix, m, n, packed_cols);
 
     CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, packed_matrix_bytes, cudaMemcpyHostToDevice));
@@ -328,21 +298,14 @@ int main(int argc, char *argv[]) {
         print_matrix_packed_u8(h_matrix, m, n, packed_cols);
     }
 
-    // NORMAS -----------------------------------------------------
     dim3 block_norms(256);
     dim3 grid_norms(m);
     CalculateNormVectorPacked<<<grid_norms, block_norms>>>(d_matrix, d_norms, m, n, packed_cols);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
-    printf("Normas finalizado.\n");
     CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
 
-    // X*X^T -----------------------------------------------------
-    // XXT manual:
-    //   grid.x recorre columnas de C;
-    //   grid.y recorre filas de C;
-    //   cada hilo calcula un C[row,col] leyendo X empaquetada.
     dim3 block_syrk(SYMRK_BLOCK_X, SYMRK_BLOCK_Y);
     dim3 grid_syrk(div_up(m, block_syrk.x), div_up(m, block_syrk.y));
     XXTManualPacked<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n, packed_cols);
@@ -351,53 +314,66 @@ int main(int argc, char *argv[]) {
 
     CUDA_CHK(cudaMemset(d_distances, 0, square_int_bytes));
 
-    printf("XXT manual con datos empaquetados finalizado.\n");
-
-    // DISTANCIAS EUCLIDEAS -----------------------------------------------------
     dim3 block_dist(16, 16);
     dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
     CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
+    // Ejecuciones de prueba y  Benchmarking loop
+
+    for(int i = 0; i < 10; i++) {
+        dim3 block_norms(256);
+        dim3 grid_norms(m);
+        nvtxRangePushA("Norms");
+        CalculateNormVectorPacked<<<grid_norms, block_norms>>>(d_matrix, d_norms, m, n, packed_cols);
+        CUDA_CHK(cudaGetLastError());
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop();
+        CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
+
+        dim3 block_syrk(SYMRK_BLOCK_X, SYMRK_BLOCK_Y);
+        dim3 grid_syrk(div_up(m, block_syrk.x), div_up(m, block_syrk.y));
+        nvtxRangePushA("XXT");
+        XXTManualPacked<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n, packed_cols);
+        CUDA_CHK(cudaGetLastError());
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop();
+        CUDA_CHK(cudaMemset(d_distances, 0, square_int_bytes));
+
+        dim3 block_dist(16, 16);
+        dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
+        nvtxRangePushA("CalculateDistance");
+        CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
+        CUDA_CHK(cudaGetLastError());
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop();
+    }
+
+    printf("Cálculos completados con éxito.\n");
 
     // DEBUGS, casos pequenos
     if (m <= 64 && n <= 1024) {
         int *h_norms = (int*)malloc((size_t)m * sizeof(int));
-        int32_t *h_XXT = NULL;
+        int32_t *h_XXT = (int32_t*)malloc(square_i32_bytes);
         CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, square_i32_bytes, cudaMemcpyDeviceToHost));
 
-        if (!h_norms) {
-            fprintf(stderr, "No hay memoria de host para validar normas.\n");
-        } else {
-            printf("Normas (debug):\n");
-            for (int i = 0; i < m; i++) {
-                printf("%d ", h_norms[i]);
-            }
-            printf("\n");
-        }
+        printf("Normas (debug):\n");
+        for (int i = 0; i < m; i++) printf("%d ", h_norms[i]);
+        printf("\n");
 
-        h_XXT = (int32_t*)malloc(square_i32_bytes);
-        if (!h_XXT) {
-            fprintf(stderr, "No hay memoria de host para validar XXT.\n");
-        } else {
-            CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, square_i32_bytes, cudaMemcpyDeviceToHost));
-
-            bool ok = validate_small_case_packed(h_matrix, h_XXT, h_norms, m, n, packed_cols);
-            printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
-        }
+        bool ok = validate_small_case_packed(h_matrix, h_XXT, h_norms, m, n, packed_cols);
+        printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
 
         int *h_distances = (int*)malloc(square_int_bytes);
-        if (!h_distances) {
-            fprintf(stderr, "No hay memoria de host para validar distancias.\n");
-        } else {
-            fprintf(stderr, "\nDistancias euclideas al cuadrado (debug):\n");
+        if (h_distances) {
+            printf("\nDistancias euclideas al cuadrado (debug):\n");
             CUDA_CHK(cudaMemcpy(h_distances, d_distances, square_int_bytes, cudaMemcpyDeviceToHost));
             print_matrix_i32((const int32_t*)h_distances, m, m);
+            free(h_distances);
         }
-
         free(h_norms);
         free(h_XXT);
-        free(h_distances);
     }
 
     cudaFree(d_matrix);

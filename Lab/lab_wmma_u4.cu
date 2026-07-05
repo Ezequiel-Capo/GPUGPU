@@ -50,14 +50,26 @@ static inline int div_up(int a, int b) {
     return (a + b - 1) / b;
 }
 
-// EUCLIDEAN DISTANCE
+// Función para obtener el índice 1D del triángulo superior
+static __device__ __host__ inline size_t get_packed_index(size_t r, size_t c, size_t m) {
+    // Si acceden fuera de orden (triángulo inferior), invertimos para simetría
+    if (r > c) {
+        size_t tmp = r;
+        r = c;
+        c = tmp;
+    }
+    return r * m - (r * (r + 1)) / 2 + c;
+}
+
+// EUCLIDEAN DISTANCE (Adaptado al formato empaquetado)
 __global__ void CalculateDistance(const int32_t *XXT, const int *norms, int *distances, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < m && col < m && row <= col) {
-        int xxt = XXT[row * m + col];
-        distances[row * m + col] = norms[row] + norms[col] - 2 * xxt;
+        size_t idx = get_packed_index(row, col, m);
+        int xxt = XXT[idx];
+        distances[idx] = norms[row] + norms[col] - 2 * xxt;
     }
 }
 
@@ -95,7 +107,7 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
     for (int k0 = 0; k0 < n; k0 += WMMA_K) {
         int k0_bytes = k0 / 2;
         
-        // Carga cooperativa de A (Copia directa de bytes hasta SHMEM_K_BYTES)
+        // Carga cooperativa de A
         for (int idx = threadIdx.x; idx < TILE_M * SHMEM_K_BYTES; idx += blockDim.x) {
             int local_row = idx / SHMEM_K_BYTES;
             int local_k_byte = idx % SHMEM_K_BYTES;
@@ -105,7 +117,7 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
             a_tile[local_row][local_k_byte] = (a_row < m && global_k_byte < n_bytes) ? X[a_row * n_bytes + global_k_byte] : 0;
         }
 
-        // Carga cooperativa de B (Copia directa de bytes hasta SHMEM_K_BYTES)
+        // Carga cooperativa de B
         for (int idx = threadIdx.x; idx < TILE_N * SHMEM_K_BYTES; idx += blockDim.x) {
             int local_row = idx / SHMEM_K_BYTES;
             int local_k_byte = idx % SHMEM_K_BYTES;
@@ -121,8 +133,6 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
             const uint8_t *a_ptr = &a_tile[warp_tile_row * WMMA_M][0];
             const uint8_t *b_ptr = &b_tile[warp_tile_col * WMMA_N][0];
 
-            // IMPORTANTE: El stride se pasa en ELEMENTOS lógicos (SHMEM_STRIDE_ELEMENTS)
-            // Esto le indica a la API que hay padding físico al final de cada fila.
             wmma::load_matrix_sync(a_frag, a_ptr, SHMEM_STRIDE_ELEMENTS);
             wmma::load_matrix_sync(b_frag, b_ptr, SHMEM_STRIDE_ELEMENTS);
             wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
@@ -138,6 +148,7 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
     __syncthreads();
 
+    // Guardado de datos en el vector empaquetado (Triangulo superior)
     for (int idx = threadIdx.x; idx < TILE_M * TILE_N; idx += blockDim.x) {
         int local_row = idx / TILE_N;
         int local_col = idx % TILE_N;
@@ -145,7 +156,8 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
         int global_col = col_base + local_col;
 
         if (global_row < m && global_col < m && global_row <= global_col) {
-            C[global_row * m + global_col] = c_tile[local_row][local_col];
+            size_t packed_idx = get_packed_index(global_row, global_col, m);
+            C[packed_idx] = c_tile[local_row][local_col];
         }
     }
 }
@@ -156,7 +168,7 @@ __inline__ __device__ int warpReduceSum(int val) {
     return val;
 }
 
-// Cálculo de normas (se mantiene igual, ya está optimizado para desempaquetar)
+// Cálculo de normas 
 __global__ void CalculateNormVector(const uint8_t *matrix, int *norms, int m, int n) {
     int row = blockIdx.x;
     if (row >= m) return;
@@ -191,8 +203,6 @@ __global__ void CalculateNormVector(const uint8_t *matrix, int *norms, int m, in
     }
 }
 
-// ... (Las funciones generate_genomic_matrix_packed, print_matrix_packed_u8, validate_small_case, print_matrix_i32 y el main() se mantienen idénticas, ya que la lógica de host y validación era correcta).
-
 // Genera datos sinteticos empaquetando dos elementos de 4 bits por byte
 void generate_genomic_matrix_packed(uint8_t *matrix, int m, int n) {
     srand(42);
@@ -220,7 +230,7 @@ void print_matrix_packed_u8(const uint8_t *matrix, int rows, int cols) {
     }
 }
 
-// Validacion CPU adaptada para leer datos empaquetados en int4
+// Validacion CPU adaptada para leer datos empaquetados en int4 Y triángulo superior
 bool validate_small_case(const uint8_t *X, const int32_t *XXT, const int *norms, int m, int n) {
     int n_bytes = n / 2;
     for (int i = 0; i < m; i++) {
@@ -246,8 +256,9 @@ bool validate_small_case(const uint8_t *X, const int32_t *XXT, const int *norms,
                 ref += vi * vj;
             }
             
-            if (XXT[i * m + j] != ref) {
-                printf("Error XXT(%d,%d): GPU=%d CPU=%d\n", i, j, XXT[i * m + j], ref);
+            size_t packed_idx = get_packed_index(i, j, m);
+            if (XXT[packed_idx] != ref) {
+                printf("Error XXT(%d,%d): GPU=%d CPU=%d\n", i, j, XXT[packed_idx], ref);
                 return false;
             }
         }
@@ -255,10 +266,12 @@ bool validate_small_case(const uint8_t *X, const int32_t *XXT, const int *norms,
     return true;
 }
 
-void print_matrix_i32(const int32_t *matrix, int rows, int cols) {
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            printf("%d ", matrix[i * cols + j]);
+// Imprime reconstruyendo la matriz cuadrada desde el empaquetado
+void print_matrix_packed_i32(const int32_t *matrix, int m) {
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < m; j++) {
+            size_t idx = get_packed_index(i, j, m);
+            printf("%d ", matrix[idx]);
         }
         printf("\n");
     }
@@ -278,11 +291,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // 1. Memoria de la matriz de entrada (Reduccion 4-bits)
     size_t matrix_elems = (size_t)m * (size_t)n;
-    // Reduccion crucial: La matriz ocupa la mitad de los bytes originales
     size_t matrix_bytes = matrix_elems * sizeof(uint8_t) / 2; 
-    size_t square_elems = (size_t)m * (size_t)m;
-    size_t square_i32_bytes = square_elems * sizeof(int32_t);
+
+    // 2. Memoria de la matriz de salida (Reduccion Triangulo Superior)
+    size_t tri_elems = (size_t)m * (size_t)(m + 1) / 2;
+    size_t tri_i32_bytes = tri_elems * sizeof(int32_t);
 
     uint8_t *h_matrix = (uint8_t*)malloc(matrix_bytes);
 
@@ -298,8 +313,9 @@ int main(int argc, char *argv[]) {
 
     CUDA_CHK(cudaMalloc(&d_matrix, matrix_bytes));
     CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(int)));
-    CUDA_CHK(cudaMalloc(&d_XXT, square_i32_bytes));
-    CUDA_CHK(cudaMalloc(&d_distances, square_i32_bytes));
+    // Asignando el tamaño reducido tri_i32_bytes
+    CUDA_CHK(cudaMalloc(&d_XXT, tri_i32_bytes));
+    CUDA_CHK(cudaMalloc(&d_distances, tri_i32_bytes));
 
     printf("Generando matriz genomica empaquetada X_int4 (%d individuos x %d SNPs)...\n", m, n);
     generate_genomic_matrix_packed(h_matrix, m, n);
@@ -319,7 +335,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaDeviceSynchronize());
 
     printf("Normas finalizado.\n");
-    CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
+    CUDA_CHK(cudaMemset(d_XXT, 0, tri_i32_bytes));
 
     // X*X^T -----------------------------------------------------
     dim3 block_syrk(THREADS_PER_BLOCK);
@@ -328,7 +344,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
-    CUDA_CHK(cudaMemset(d_distances, 0, square_i32_bytes));
+    CUDA_CHK(cudaMemset(d_distances, 0, tri_i32_bytes));
     printf("XXT con tensor cores finalizado\n");
 
     // DISTANCIAS EUCLIDEAS -----------------------------------------------------
@@ -348,7 +364,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
+        CUDA_CHK(cudaMemset(d_XXT, 0, tri_i32_bytes));
 
         // XXT WMMA int4
         nvtxRangePushA("XXT_Int4");
@@ -356,7 +372,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        CUDA_CHK(cudaMemset(d_distances, 0, square_i32_bytes));
+        CUDA_CHK(cudaMemset(d_distances, 0, tri_i32_bytes));
 
         // DISTANCIAS
         nvtxRangePushA("CalculateDistance");
@@ -368,10 +384,10 @@ int main(int argc, char *argv[]) {
     // DEBUGS para validacion en casos pequeños
     if (m <= 64 && n <= 1024) {
         int *h_norms = (int*)malloc((size_t)m * sizeof(int));
-        int32_t *h_XXT = (int32_t*)malloc(square_i32_bytes);
+        int32_t *h_XXT = (int32_t*)malloc(tri_i32_bytes);
         
         CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, square_i32_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, tri_i32_bytes, cudaMemcpyDeviceToHost));
 
         printf("Normas (debug):\n");
         for (int i = 0; i < m; i++) printf("%d ", h_norms[i]);
@@ -380,10 +396,12 @@ int main(int argc, char *argv[]) {
         bool ok = validate_small_case(h_matrix, h_XXT, h_norms, m, n);
         printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
 
-        int *h_distances = (int*)malloc(square_i32_bytes);
+        int *h_distances = (int*)malloc(tri_i32_bytes);
         fprintf(stderr, "\nDistancias euclideas al cuadrado (debug):\n");
-        CUDA_CHK(cudaMemcpy(h_distances, d_distances, square_i32_bytes, cudaMemcpyDeviceToHost));
-        print_matrix_i32(h_distances, m, m);
+        CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_i32_bytes, cudaMemcpyDeviceToHost));
+        
+        // Usamos la nueva funcion de impresion que reconstruye la cuadricula
+        print_matrix_packed_i32(h_distances, m);
 
         free(h_norms);
         free(h_XXT);

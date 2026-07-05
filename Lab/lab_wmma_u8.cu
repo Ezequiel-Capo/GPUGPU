@@ -15,8 +15,8 @@ using namespace nvcuda;
 // SYMRK: el resultado es m x m y simetrico, porque:
 //   XXT[i,j] = dot(X[i,*], X[j,*]) = XXT[j,i]
 //
-// Por esa simetria calculamos y guardamos solo el triangulo superior.
-// La matriz se reserva como m x m completa, (ver de cambiar a coo)
+// Por esa simetria calculamos y guardamos solo el triangulo superior en formato 
+// "empaquetado" 1D, ahorrando casi un 50% de memoria global.
 //
 // Cada warp ejecuta una operacion WMMA 16x16x16:
 //   X_frag = A_frag  = 16 filas de X por 16 SNPs
@@ -24,12 +24,6 @@ using namespace nvcuda;
 //   C_frag += A_frag * B_frag^T
 //
 // WARP_TILE_M y WARP_TILE_N eligen cuantos subtiles 16x16 hay por bloque.
-// Cambiarlos cambia automaticamente cantidad de warps, hilos y tamano del tile:
-//
-//   WARP_TILE_M x WARP_TILE_N -> warps -> hilos -> tile C
-//   2 x 2                     -> 4     -> 128   -> 32x32
-//   2 x 4                     -> 8     -> 256   -> 32x64
-//   4 x 2                     -> 8     -> 256   -> 64x32
 #define WARP_TILE_M 2
 #define WARP_TILE_N 2
 #define WMMA_M 16
@@ -74,32 +68,29 @@ static inline int div_up(int a, int b) {
     return (a + b - 1) / b;
 }
 
+// -------------------------------------------------------------------------
+// Función para mapear índices (r, c) de una matriz simétrica (r <= c)
+// a un índice 1D que guarda exclusivamente el triángulo superior.
+static __device__ __host__ inline size_t get_packed_index(size_t r, size_t c, size_t m) {
+    return r * m - (r * (r + 1)) / 2 + c;
+}
+
 // EUCLIDEAN DISTANCE
 // D^2(i,j) = ||X_i||^2 + ||X_j||^2 - 2 * dot(X_i, X_j)
-// XXT ya contiene dot(X_i, X_j). Como las distancias tambien son simetricas,
-// solo escribimos row <= col. d_distances se inicializa con cudaMemset, asi que
-// el triangulo inferior queda en cero.
+// XXT ya contiene dot(X_i, X_j). 
 __global__ void CalculateDistance(const int32_t *XXT, const int *norms,
                                   int *distances, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < m && col < m && row <= col) {
-        int xxt = XXT[row * m + col];
-        distances[row * m + col] = norms[row] + norms[col] - 2 * xxt;
+        size_t packed_idx = get_packed_index(row, col, m);
+        int xxt = XXT[packed_idx];
+        distances[packed_idx] = norms[row] + norms[col] - 2 * xxt;
     }
 }
 
 // XXT = X * X^T usando Tensor Cores.
-// Cada bloque calcula un tile TILE_M x TILE_N de C.
-// Para cada bloque de SNPs k0:k0+15 cargamos en shared:
-//   A = X[row_base:row_base+TILE_M, k0:k0+15] -> TILE_M x 16
-//   B = X[col_base:col_base+TILE_N, k0:k0+15] -> TILE_N x 16
-//
-//   C_tile += A * B^T = X*X^T
-//
-// B se carga en WMMA como col_major. Eso equivale a usar B^T sin hacer una
-// transposicion explicita: B[j][k] en row-major se ve como B_wmma[k][j].
 __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
     int row_base = blockIdx.y * TILE_M;
@@ -108,34 +99,15 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
     // col < row. Como solo guardamos triangulo superior
     if (col_base + TILE_N <= row_base) return;
 
-    // Un warp completo ejecuta una sola operacion WMMA. warp_id identifica que
-    // subtile 16x16 de C le toca a este warp dentro del bloque.
     int warp_id = threadIdx.x / WARP_SIZE;
-
-    // Mapeo row-major de warps sobre la grilla de subtiles 16x16.
-    // Ejemplo WARP_TILE_M=2, WARP_TILE_N=4:
-    //   warp_id:        0      1      2      3
-    //               [0,0]  [0,1]  [0,2]  [0,3]
-    //   warp_id:        4      5      6      7
-    //               [1,0]  [1,1]  [1,2]  [1,3]
     int warp_tile_row = warp_id / WARP_TILE_N;
     int warp_tile_col = warp_id % WARP_TILE_N;
 
-    // Coordenada global del subtile 16x16 que calcula este warp.
     int subtile_row = row_base + warp_tile_row * WMMA_M;
     int subtile_col = col_base + warp_tile_col * WMMA_N;
 
-    // Si el subtile completo esta bajo la diagonal, sus 16 columnas quedan antes
-    // de su primera fila. Ese warp no llama a WMMA
     bool compute_subtile = (subtile_col + WMMA_N > subtile_row);
 
-    // Shared memory:
-    //
-    // a_tile/b_tile son caches por bloque de los pedazos de X que se reutilizan
-    // por todos los warps del tile de salida. El ancho logico es WMMA_K=16, pero
-    // el stride fisico es SHMEM_K por padding.
-    //
-    // c_tile recibe los resultados de WMMA antes de escribir a global. 
     __shared__ __align__(32) uint8_t a_tile[TILE_M][SHMEM_K];
     __shared__ __align__(32) uint8_t b_tile[TILE_N][SHMEM_K];
     __shared__ __align__(32) int32_t c_tile[TILE_M][SHMEM_C_N];
@@ -147,11 +119,6 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
     wmma::fill_fragment(c_frag, 0);
 
     for (int k0 = 0; k0 < n; k0 += WMMA_K) {
-        // Carga cooperativa de A = X[row_tile, k0:k0+15].
-
-        // Todos los hilos del bloque cargan elementos escalares. Si el tile cae
-        // fuera de m o n, se rellena con cero para que WMMA pueda operar siempre
-        // sobre fragments 16x16x16 completos.
         for (int idx = threadIdx.x; idx < TILE_M * WMMA_K; idx += blockDim.x) {
             int local_row = idx / WMMA_K;
             int local_k = idx % WMMA_K;
@@ -161,10 +128,6 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
             a_tile[local_row][local_k] = (a_row < m && global_k < n) ? X[a_row * n + global_k] : 0;
         }
 
-        // Carga cooperativa de B = X[col_tile, k0:k0+15].
-        
-        // B tambien viene desde X, no desde una matriz transpuesta explícita.
-        // La transposicion se logra en la carga WMMA usando matrix_b col_major.
         for (int idx = threadIdx.x; idx < TILE_N * WMMA_K; idx += blockDim.x) {
             int local_row = idx / WMMA_K;
             int local_k = idx % WMMA_K;
@@ -177,7 +140,6 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
         __syncthreads();
 
         if (compute_subtile) {
-            // Cada warp carga su subtile 16x16 de A y B desde shared memory y ejecuta WMMA.
             const uint8_t *a_ptr = &a_tile[warp_tile_row * WMMA_M][0];
             const uint8_t *b_ptr = &b_tile[warp_tile_col * WMMA_N][0];
 
@@ -188,7 +150,6 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
         __syncthreads();
     }
 
-    // Cada warp almacena su subtile 16x16 de C en shared memory.
     if (compute_subtile) {
         int local_row = warp_tile_row * WMMA_M;
         int local_col = warp_tile_col * WMMA_N;
@@ -197,7 +158,7 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
     __syncthreads();
 
-    // Cada hilo del bloque escribe su parte de C desde shared memory a global.
+    // Volcado a memoria global (modificado para usar formato empaquetado 1D)
     for (int idx = threadIdx.x; idx < TILE_M * TILE_N; idx += blockDim.x) {
         int local_row = idx / TILE_N;
         int local_col = idx % TILE_N;
@@ -205,19 +166,13 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
         int global_col = col_base + local_col;
 
         if (global_row < m && global_col < m && global_row <= global_col) {
-            C[global_row * m + global_col] = c_tile[local_row][local_col];
+            size_t packed_idx = get_packed_index(global_row, global_col, m);
+            C[packed_idx] = c_tile[local_row][local_col];
         }
     }
 }
 
 // NORMAS
-// norms[row] = ||X[row,*]||^2 = sum_k X[row,k]^2
-//
-// Cada bloque calcula una fila de X. Los hilos recorren la fila con stride
-// blockDim.x y acumulan una suma parcial local. Luego reducimos:
-//   1. dentro de cada warp con shuffle instructions;
-//   2. entre warps usando shared memory;
-//   3. el lane 0 del warp 0 escribe el resultado final.
 __inline__ __device__ int warpReduceSum(int val) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1)
         val += __shfl_down_sync(0xffffffff, val, offset);
@@ -235,10 +190,8 @@ __global__ void CalculateNormVector(const uint8_t *matrix, int *norms,
         local_norm += v * v;
     }
 
-    // El lane 0 de cada warp tiene la suma completa
     local_norm = warpReduceSum(local_norm);
 
-    // Maximo 1024 hilos por bloque => maximo 32 warps.
     __shared__ int warp_sums[32];
     int lane = threadIdx.x & 31;
     int warp_id = threadIdx.x >> 5;
@@ -260,8 +213,6 @@ __global__ void CalculateNormVector(const uint8_t *matrix, int *norms,
 
 void generate_genomic_matrix(uint8_t *matrix, int m, int n) {
     srand(42);
-
-    // Datos sinteticos: cada genotipo ocupa un byte con valores 0, 1 o 2.
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < n; j++) {
             matrix[i * n + j] = rand() % 3; // 0, 1, 2
@@ -279,8 +230,6 @@ void print_matrix_u8(const uint8_t *matrix, int rows, int cols) {
 }
 
 bool validate_small_case(const uint8_t *X, const int32_t *XXT, const int *norms, int m, int n) {
-    // Validacion CPU para casos chicos. Solo revisa el triangulo superior porque
-    // esa es la parte que el kernel define como salida valida.
     for (int i = 0; i < m; i++) {
         int ref_norm = 0;
         for (int k = 0; k < n; k++) {
@@ -297,20 +246,27 @@ bool validate_small_case(const uint8_t *X, const int32_t *XXT, const int *norms,
             for (int k = 0; k < n; k++) 
                 ref += (int32_t)X[i * n + k] * (int32_t)X[j * n + k];
             
-            if (XXT[i * m + j] != ref) {
-                printf("Error XXT(%d,%d): GPU=%d CPU=%d\n", i, j, XXT[i * m + j], ref);
+            // Evaluamos con el índice empaquetado
+            size_t packed_idx = get_packed_index(i, j, m);
+            if (XXT[packed_idx] != ref) {
+                printf("Error XXT(%d,%d): GPU=%d CPU=%d\n", i, j, XXT[packed_idx], ref);
                 return false;
             }
         }
     }
-
     return true;
 }
 
-void print_matrix_i32(const int32_t  *matrix, int rows, int cols) {
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            printf("%d ", matrix[i * cols + j]);
+// NUEVO: Imprimir reconstruyendo la matriz cuadrada desde el formato empaquetado
+void print_packed_matrix_i32(const int32_t *matrix, int m) {
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < m; j++) {
+            if (i <= j) {
+                size_t packed_idx = get_packed_index(i, j, m);
+                printf("%d ", matrix[packed_idx]);
+            } else {
+                printf("0 "); // Triángulo inferior es 0
+            }
         }
         printf("\n");
     }
@@ -332,15 +288,15 @@ int main(int argc, char *argv[]) {
 
     size_t matrix_elems = (size_t)m * (size_t)n;
     size_t matrix_bytes = matrix_elems * sizeof(uint8_t);
-    size_t square_elems = (size_t)m * (size_t)m;
-    size_t square_i32_bytes = square_elems * sizeof(int32_t);
+    
+    // NUEVO: Cantidad de elementos del triángulo superior (empaquetado 1D)
+    size_t tri_elems = (size_t)m * (m + 1) / 2;
+    size_t tri_i32_bytes = tri_elems * sizeof(int32_t);
 
     uint8_t *h_matrix = (uint8_t*)malloc(matrix_bytes);
 
-
-    if (!h_matrix) { //teóricamente deberia exceder cercano a 16GiB (2^34 bytes)
+    if (!h_matrix) { 
         fprintf(stderr, "No hay memoria de host suficiente.\n");
-        free(h_matrix);
         return 1;
     }
 
@@ -349,16 +305,16 @@ int main(int argc, char *argv[]) {
     int32_t *d_XXT = NULL;
     int *d_distances = NULL;
 
-    // Device: d_XXT y d_distances se reservan como m x m completas. (se usa solo triang sup, BN de cudaMalloc)
+    // Device: d_XXT y d_distances ahora reservan solo para tri_i32_bytes
     CUDA_CHK(cudaMalloc(&d_matrix, matrix_bytes));
     CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(int)));
-    CUDA_CHK(cudaMalloc(&d_XXT, square_i32_bytes));
-    CUDA_CHK(cudaMalloc(&d_distances, square_i32_bytes));
+    CUDA_CHK(cudaMalloc(&d_XXT, tri_i32_bytes));
+    CUDA_CHK(cudaMalloc(&d_distances, tri_i32_bytes));
 
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
     generate_genomic_matrix(h_matrix, m, n);
 
-    //WARM UP:
+    // WARM UP:
     CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
     if (m <= 64 && n <= 128) {
         printf("\nX (debug):\n");
@@ -373,20 +329,16 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaDeviceSynchronize());
 
     printf("Normas finalizado.\n");
-    CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
+    CUDA_CHK(cudaMemset(d_XXT, 0, tri_i32_bytes));
 
     // X*X^T -----------------------------------------------------
-    // SYMRK:
-    //   grid.x recorre columnas de C en bloques TILE_N;
-    //   grid.y recorre filas de C en bloques TILE_M;
-    //   block.x tiene WARPS_PER_BLOCK warps, uno por subtile WMMA 16x16.
     dim3 block_syrk(THREADS_PER_BLOCK);
     dim3 grid_syrk(div_up(m, TILE_N), div_up(m, TILE_M));
     XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
-    CUDA_CHK(cudaMemset(d_distances, 0, square_i32_bytes));
+    CUDA_CHK(cudaMemset(d_distances, 0, tri_i32_bytes));
 
     printf("SYRK con tensor cores finalizado\n");
 
@@ -396,50 +348,37 @@ int main(int argc, char *argv[]) {
     CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
+    
     for (int i = 0; i < 10; i++) {
         CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
-        if (m <= 64 && n <= 128) {
-            printf("\nX (debug):\n");
-            print_matrix_u8(h_matrix, m, n);
-        }
 
         // NORMAS -----------------------------------------------------
-        dim3 block_norms(256);
-        dim3 grid_norms(m);
         nvtxRangePushA("Norms");
         CalculateNormVector<<<grid_norms, block_norms>>>(d_matrix, d_norms, m, n);
         CUDA_CHK(cudaGetLastError());
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        printf("Normas finalizado.\n");
-        CUDA_CHK(cudaMemset(d_XXT, 0, square_i32_bytes));
+        CUDA_CHK(cudaMemset(d_XXT, 0, tri_i32_bytes));
 
         // X*X^T -----------------------------------------------------
-        // XXT:
-        //   grid.x recorre columnas de C en bloques TILE_N;
-        //   grid.y recorre filas de C en bloques TILE_M;
-        //   block.x tiene WARPS_PER_BLOCK warps, uno por subtile WMMA 16x16.
-        dim3 block_syrk(THREADS_PER_BLOCK);
-        dim3 grid_syrk(div_up(m, TILE_N), div_up(m, TILE_M));
         nvtxRangePushA("XXT");
         XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
         CUDA_CHK(cudaGetLastError());
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        printf("XXT con tensor cores finalizado\n");
-        CUDA_CHK(cudaMemset(d_distances, 0, square_i32_bytes));
+        CUDA_CHK(cudaMemset(d_distances, 0, tri_i32_bytes));
+        
         // DISTANCIAS EUCLIDEAS -----------------------------------------------------
-        dim3 block_dist(16, 16);
-        dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
         nvtxRangePushA("CalculateDistance");
         CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
         CUDA_CHK(cudaGetLastError());
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop(); 
     }
-    //DEBUGS, casos pequeños
+    
+    // DEBUGS, casos pequeños
     if (m <= 64 && n <= 1024) {
         int *h_norms = (int*)malloc((size_t)m * sizeof(int));
         int32_t *h_XXT = NULL;
@@ -453,26 +392,30 @@ int main(int argc, char *argv[]) {
             }
             printf("\n");
         }
-        h_XXT = (int32_t*)malloc(square_i32_bytes);
+        
+        h_XXT = (int32_t*)malloc(tri_i32_bytes); // Cambiado
         if (!h_XXT) {
             fprintf(stderr, "No hay memoria de host para validar XXT.\n");
         } else {
-            CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, square_i32_bytes, cudaMemcpyDeviceToHost));
+            CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, tri_i32_bytes, cudaMemcpyDeviceToHost)); // Cambiado
 
             bool ok = validate_small_case(h_matrix, h_XXT, h_norms, m, n);
             printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
         }
-        int *h_distances = (int*)malloc(square_i32_bytes); // MxM = Dmxm = X(mxn) * X^T(nxm) + N(m) + N^T(m)
+        
+        int *h_distances = (int*)malloc(tri_i32_bytes); // Cambiado
         if (!h_distances) {
             fprintf(stderr, "No hay memoria de host para validar distancias.\n");
         } else {
             fprintf(stderr, "\nDistancias euclideas al cuadrado (debug):\n");
-            CUDA_CHK(cudaMemcpy(h_distances, d_distances, square_i32_bytes, cudaMemcpyDeviceToHost));
-            print_matrix_i32(h_distances, m, m);
+            CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_i32_bytes, cudaMemcpyDeviceToHost)); // Cambiado
+            
+            // Usamos la nueva función para imprimir reconstruyendo el 2D
+            print_packed_matrix_i32(h_distances, m); 
         }
         free(h_norms);
-        free(h_XXT);
-        free(h_distances);
+        if (h_XXT) free(h_XXT);
+        if (h_distances) free(h_distances);
     }
 
     cudaFree(d_matrix);
