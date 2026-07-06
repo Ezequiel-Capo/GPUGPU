@@ -40,8 +40,7 @@ __global__ void m_traspose_kernel(float *d_matriz_ini, float *d_matriz_res, int 
     } 
 }
 
-__global__ void m_traspose_kernel_padding(float *d_matriz_ini, float *d_matriz_res, int N)
-{
+__global__ void m_traspose_kernel_padding(float *d_matriz_ini, float *d_matriz_res, int N){
     __shared__ float tile[TILE_DIM][TILE_DIM + TILE_PAD]; 
 
     int idx_x = blockIdx.x * blockDim.x + threadIdx.x; //column_id Bidx * N + tidx (las q son coalesced)

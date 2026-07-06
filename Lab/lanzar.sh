@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=practico2_ej1
+#SBATCH --job-name=lab
 #SBATCH --ntasks=1
 #SBATCH --mem=16G
 #SBATCH --time=00:05:00
@@ -22,8 +22,17 @@ run_exe="${exe}_${SLURM_JOB_ID:-$$}"
 trap 'rm -f "$run_exe"' EXIT
 
 case "$exe" in
-	"./lab")
-		nvcc -O2 -arch=sm_75 -o "$run_exe" lab.cu
+	"./lab_manual_packed")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_manual_packed.cu
+		;;
+    "./lab_wmma_u4")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_u4.cu
+		;;
+    "./lab_wmma_u8")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_u8.cu
+		;;
+	"./error_numerico")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" error_numerico.cu
 		;;
     *)
 		echo "Error: ejecutable no soportado: $exe"
@@ -39,4 +48,5 @@ if [ "$1" = "--nsys" ]; then
 else
     "$run_exe" "$@"
 fi
-#sbatch lanzar.sh "./ej1" "secreto.txt"
+#sbatch lanzar.sh "./lab" 
+#sbatch --parsable --output=labWMMA.out --error=labWMMA.err lanzar.sh "./lab" --nsys tensorShared 1024 1048576
