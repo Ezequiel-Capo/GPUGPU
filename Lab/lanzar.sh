@@ -31,6 +31,9 @@ case "$exe" in
     "./lab_wmma_u8")
 		nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_u8.cu
 		;;
+	"./error_numerico")
+		nvcc -O3 -arch=sm_75 -o "$run_exe" error_numerico.cu
+		;;
     *)
 		echo "Error: ejecutable no soportado: $exe"
 		exit 1

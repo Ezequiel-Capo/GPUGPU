@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <math.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h> // Incluido para el tipo half
 #include <mma.h>
 #include <nvtx3/nvToolsExt.h>
 
@@ -52,7 +54,6 @@ static inline int div_up(int a, int b) {
 
 // Función para obtener el índice 1D del triángulo superior
 static __device__ __host__ inline size_t get_packed_index(size_t r, size_t c, size_t m) {
-    // Si acceden fuera de orden (triángulo inferior), invertimos para simetría
     if (r > c) {
         size_t tmp = r;
         r = c;
@@ -61,20 +62,32 @@ static __device__ __host__ inline size_t get_packed_index(size_t r, size_t c, si
     return r * m - (r * (r + 1)) / 2 + c;
 }
 
-// EUCLIDEAN DISTANCE (Adaptado al formato empaquetado)
-__global__ void CalculateDistance(const int32_t *XXT, const int *norms, int *distances, int m) {
+// EUCLIDEAN DISTANCE CON RAIZ CUADRADA, FLOAT16 Y UNSIGNED INT
+__global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms, half *distances, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < m && col < m && row <= col) {
         size_t idx = get_packed_index(row, col, m);
-        int xxt = XXT[idx];
-        distances[idx] = norms[row] + norms[col] - 2 * xxt;
+        uint32_t xxt = XXT[idx];
+        uint32_t norm_row = norms[row];
+        uint32_t norm_col = norms[col];
+
+        uint32_t sum_norms = norm_row + norm_col;
+        float dist_f = 0.0f;
+        
+        // Prevenir negativos (underflow) y calcular raíz cuadrada
+        if (sum_norms > 2 * xxt) {
+            dist_f = sqrtf((float)(sum_norms - 2 * xxt));
+        }
+
+        // Guardar resultado como float16 (half)
+        distances[idx] = __float2half(dist_f);
     }
 }
 
-// XXT = X * X^T usando Tensor Cores de 4 bits (u4).
-__global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
+// XXT = X * X^T usando Tensor Cores de 4 bits (u4). Modificado para guardar en uint32_t.
+__global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, int m, int n) {
     int row_base = blockIdx.y * TILE_M;
     int col_base = blockIdx.x * TILE_N;
 
@@ -97,7 +110,7 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
     // Uso del namespace experimental para precisión u4 (unsigned 4-bit)
     wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::experimental::precision::u4, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::experimental::precision::u4, wmma::col_major> b_frag;
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, int32_t> c_frag;
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, int32_t> c_frag; // Obligatorio int32_t por API
 
     wmma::fill_fragment(c_frag, 0);
 
@@ -148,7 +161,7 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
     __syncthreads();
 
-    // Guardado de datos en el vector empaquetado (Triangulo superior)
+    // Guardado de datos en el vector empaquetado (Triangulo superior) y Casteo a uint32_t
     for (int idx = threadIdx.x; idx < TILE_M * TILE_N; idx += blockDim.x) {
         int local_row = idx / TILE_N;
         int local_col = idx % TILE_N;
@@ -157,37 +170,37 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, int32_t *C, int m, int n) {
 
         if (global_row < m && global_col < m && global_row <= global_col) {
             size_t packed_idx = get_packed_index(global_row, global_col, m);
-            C[packed_idx] = c_tile[local_row][local_col];
+            C[packed_idx] = (uint32_t)c_tile[local_row][local_col]; 
         }
     }
 }
 
-__inline__ __device__ int warpReduceSum(int val) {
+__inline__ __device__ uint32_t warpReduceSum(uint32_t val) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1)
         val += __shfl_down_sync(0xffffffff, val, offset);
     return val;
 }
 
-// Cálculo de normas 
-__global__ void CalculateNormVector(const uint8_t *matrix, int *norms, int m, int n) {
+// Cálculo de normas adaptado a uint32_t
+__global__ void CalculateNormVector(const uint8_t *matrix, uint32_t *norms, int m, int n) {
     int row = blockIdx.x;
     if (row >= m) return;
 
-    int local_norm = 0;
+    uint32_t local_norm = 0;
     int n_bytes = n / 2;
 
     for (int col_byte = threadIdx.x; col_byte < n_bytes; col_byte += blockDim.x) {
         uint8_t byte = matrix[row * n_bytes + col_byte];
         
-        int v0 = byte & 0x0F;
-        int v1 = (byte >> 4) & 0x0F;
+        uint32_t v0 = byte & 0x0F;
+        uint32_t v1 = (byte >> 4) & 0x0F;
         
         local_norm += (v0 * v0) + (v1 * v1);
     }
 
     local_norm = warpReduceSum(local_norm);
 
-    __shared__ int warp_sums[32];
+    __shared__ uint32_t warp_sums[32];
     int lane = threadIdx.x & 31;
     int warp_id = threadIdx.x >> 5;
     int warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
@@ -197,7 +210,7 @@ __global__ void CalculateNormVector(const uint8_t *matrix, int *norms, int m, in
     __syncthreads();
 
     if (warp_id == 0) {
-        int sum = (lane < warps_per_block) ? warp_sums[lane] : 0;
+        uint32_t sum = (lane < warps_per_block) ? warp_sums[lane] : 0;
         sum = warpReduceSum(sum);
         if (lane == 0) norms[row] = sum;
     }
@@ -230,35 +243,35 @@ void print_matrix_packed_u8(const uint8_t *matrix, int rows, int cols) {
     }
 }
 
-// Validacion CPU adaptada para leer datos empaquetados en int4 Y triángulo superior
-bool validate_small_case(const uint8_t *X, const int32_t *XXT, const int *norms, int m, int n) {
+// Validacion CPU adaptada para unsigned
+bool validate_small_case(const uint8_t *X, const uint32_t *XXT, const uint32_t *norms, int m, int n) {
     int n_bytes = n / 2;
     for (int i = 0; i < m; i++) {
-        int ref_norm = 0;
+        uint32_t ref_norm = 0;
         for (int k = 0; k < n; k++) {
             int byte_idx = k / 2;
             int shift = (k % 2) * 4;
-            int v = (X[i * n_bytes + byte_idx] >> shift) & 0x0F;
+            uint32_t v = (X[i * n_bytes + byte_idx] >> shift) & 0x0F;
             ref_norm += v * v;
         }
         if (norms[i] != ref_norm) {
-            printf("Error norma fila %d: GPU=%d CPU=%d\n", i, norms[i], ref_norm);
+            printf("Error norma fila %d: GPU=%u CPU=%u\n", i, norms[i], ref_norm);
             return false;
         }
 
         for (int j = i; j < m; j++) {
-            int32_t ref = 0;
+            uint32_t ref = 0;
             for (int k = 0; k < n; k++) {
                 int byte_idx = k / 2;
                 int shift = (k % 2) * 4;
-                int vi = (X[i * n_bytes + byte_idx] >> shift) & 0x0F;
-                int vj = (X[j * n_bytes + byte_idx] >> shift) & 0x0F;
+                uint32_t vi = (X[i * n_bytes + byte_idx] >> shift) & 0x0F;
+                uint32_t vj = (X[j * n_bytes + byte_idx] >> shift) & 0x0F;
                 ref += vi * vj;
             }
             
             size_t packed_idx = get_packed_index(i, j, m);
             if (XXT[packed_idx] != ref) {
-                printf("Error XXT(%d,%d): GPU=%d CPU=%d\n", i, j, XXT[packed_idx], ref);
+                printf("Error XXT(%d,%d): GPU=%u CPU=%u\n", i, j, XXT[packed_idx], ref);
                 return false;
             }
         }
@@ -266,12 +279,22 @@ bool validate_small_case(const uint8_t *X, const int32_t *XXT, const int *norms,
     return true;
 }
 
-// Imprime reconstruyendo la matriz cuadrada desde el empaquetado
-void print_matrix_packed_i32(const int32_t *matrix, int m) {
+void print_matrix_packed_u32(const uint32_t *matrix, int m) {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < m; j++) {
             size_t idx = get_packed_index(i, j, m);
-            printf("%d ", matrix[idx]);
+            printf("%u ", matrix[idx]);
+        }
+        printf("\n");
+    }
+}
+
+// NUEVO: Imprime reconstruyendo la matriz cuadrada desde el empaquetado half
+void print_matrix_packed_half(const half *matrix, int m) {
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < m; j++) {
+            size_t idx = get_packed_index(i, j, m);
+            printf("%6.2f ", __half2float(matrix[idx]));
         }
         printf("\n");
     }
@@ -297,7 +320,8 @@ int main(int argc, char *argv[]) {
 
     // 2. Memoria de la matriz de salida (Reduccion Triangulo Superior)
     size_t tri_elems = (size_t)m * (size_t)(m + 1) / 2;
-    size_t tri_i32_bytes = tri_elems * sizeof(int32_t);
+    size_t tri_u32_bytes = tri_elems * sizeof(uint32_t);
+    size_t tri_half_bytes = tri_elems * sizeof(half); // Bytes para half
 
     uint8_t *h_matrix = (uint8_t*)malloc(matrix_bytes);
 
@@ -307,15 +331,14 @@ int main(int argc, char *argv[]) {
     }
 
     uint8_t *d_matrix = NULL;
-    int *d_norms = NULL;
-    int32_t *d_XXT = NULL;
-    int *d_distances = NULL;
+    uint32_t *d_norms = NULL;
+    uint32_t *d_XXT = NULL;
+    half *d_distances = NULL;
 
     CUDA_CHK(cudaMalloc(&d_matrix, matrix_bytes));
-    CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(int)));
-    // Asignando el tamaño reducido tri_i32_bytes
-    CUDA_CHK(cudaMalloc(&d_XXT, tri_i32_bytes));
-    CUDA_CHK(cudaMalloc(&d_distances, tri_i32_bytes));
+    CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(uint32_t)));
+    CUDA_CHK(cudaMalloc(&d_XXT, tri_u32_bytes));
+    CUDA_CHK(cudaMalloc(&d_distances, tri_half_bytes));
 
     printf("Generando matriz genomica empaquetada X_int4 (%d individuos x %d SNPs)...\n", m, n);
     generate_genomic_matrix_packed(h_matrix, m, n);
@@ -335,7 +358,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaDeviceSynchronize());
 
     printf("Normas finalizado.\n");
-    CUDA_CHK(cudaMemset(d_XXT, 0, tri_i32_bytes));
+    CUDA_CHK(cudaMemset(d_XXT, 0, tri_u32_bytes));
 
     // X*X^T -----------------------------------------------------
     dim3 block_syrk(THREADS_PER_BLOCK);
@@ -344,7 +367,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
-    CUDA_CHK(cudaMemset(d_distances, 0, tri_i32_bytes));
+    CUDA_CHK(cudaMemset(d_distances, 0, tri_half_bytes));
     printf("XXT con tensor cores finalizado\n");
 
     // DISTANCIAS EUCLIDEAS -----------------------------------------------------
@@ -364,7 +387,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        CUDA_CHK(cudaMemset(d_XXT, 0, tri_i32_bytes));
+        CUDA_CHK(cudaMemset(d_XXT, 0, tri_u32_bytes));
 
         // XXT WMMA int4
         nvtxRangePushA("XXT_Int4");
@@ -372,7 +395,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        CUDA_CHK(cudaMemset(d_distances, 0, tri_i32_bytes));
+        CUDA_CHK(cudaMemset(d_distances, 0, tri_half_bytes));
 
         // DISTANCIAS
         nvtxRangePushA("CalculateDistance");
@@ -383,25 +406,25 @@ int main(int argc, char *argv[]) {
 
     // DEBUGS para validacion en casos pequeños
     if (m <= 64 && n <= 1024) {
-        int *h_norms = (int*)malloc((size_t)m * sizeof(int));
-        int32_t *h_XXT = (int32_t*)malloc(tri_i32_bytes);
+        uint32_t *h_norms = (uint32_t*)malloc((size_t)m * sizeof(uint32_t));
+        uint32_t *h_XXT = (uint32_t*)malloc(tri_u32_bytes);
         
-        CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, tri_i32_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, tri_u32_bytes, cudaMemcpyDeviceToHost));
 
         printf("Normas (debug):\n");
-        for (int i = 0; i < m; i++) printf("%d ", h_norms[i]);
+        for (int i = 0; i < m; i++) printf("%u ", h_norms[i]);
         printf("\n");
 
         bool ok = validate_small_case(h_matrix, h_XXT, h_norms, m, n);
         printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
 
-        int *h_distances = (int*)malloc(tri_i32_bytes);
-        fprintf(stderr, "\nDistancias euclideas al cuadrado (debug):\n");
-        CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_i32_bytes, cudaMemcpyDeviceToHost));
+        half *h_distances = (half*)malloc(tri_half_bytes);
+        fprintf(stderr, "\nDistancias euclideas (debug):\n");
+        CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_half_bytes, cudaMemcpyDeviceToHost));
         
-        // Usamos la nueva funcion de impresion que reconstruye la cuadricula
-        print_matrix_packed_i32(h_distances, m);
+        // Usamos la nueva funcion de impresion adaptada para half
+        print_matrix_packed_half(h_distances, m);
 
         free(h_norms);
         free(h_XXT);
