@@ -390,7 +390,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaMemset(d_XXT, 0, tri_u32_bytes));
 
         // XXT WMMA int4
-        nvtxRangePushA("XXT_Int4");
+        nvtxRangePushA("XXT");
         XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
