@@ -45,7 +45,7 @@ for prog in "${PROGRAMAS[@]}"; do
             }
 
             header && /PushPop/ {
-                if ($NF ~ /:(XXT|Norms|CalculateDistance)$/)
+                if ($NF ~ /:(XXT|Norms|CalculateDistance|GenX)$/)
                     print
             }
             ' "$archivo"

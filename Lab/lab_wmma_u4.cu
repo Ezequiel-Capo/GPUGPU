@@ -216,19 +216,40 @@ __global__ void CalculateNormVector(const uint8_t *matrix, uint32_t *norms, int 
     }
 }
 
-// Genera datos sinteticos empaquetando dos elementos de 4 bits por byte
-void generate_genomic_matrix_packed(uint8_t *matrix, int m, int n) {
-    srand(42);
+__device__ static inline uint32_t hash_u32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+__global__ void GenerateGenomicMatrixPackedKernelU4(uint8_t *matrix, int m, int n_bytes, uint32_t seed) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int byte_col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row >= m || byte_col >= n_bytes) return;
+
+    int col0 = byte_col * 2;
+    int col1 = col0 + 1;
+
+    uint32_t k0 = seed ^ ((uint32_t)row * 0x9e3779b9u) ^ ((uint32_t)col0 * 0x85ebca6bu);
+    uint32_t k1 = seed ^ ((uint32_t)row * 0xc2b2ae35u) ^ ((uint32_t)col1 * 0x27d4eb2fu);
+
+    uint8_t v0 = (uint8_t)(hash_u32(k0) % 3u);
+    uint8_t v1 = (uint8_t)(hash_u32(k1) % 3u);
+
+    matrix[(size_t)row * (size_t)n_bytes + (size_t)byte_col] = (uint8_t)((v0 & 0x0F) | ((v1 & 0x0F) << 4));
+}
+
+void generate_genomic_matrix_packed_device(uint8_t *d_matrix, int m, int n) {
     int n_bytes = n / 2;
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n_bytes; j++) {
-            uint8_t v0 = rand() % 3; // Valores 0, 1, 2
-            uint8_t v1 = rand() % 3;
-            
-            // Empaquetado: v0 en los bajos, v1 en los altos
-            matrix[i * n_bytes + j] = (v0 & 0x0F) | ((v1 & 0x0F) << 4);
-        }
-    }
+    dim3 block(32, 8);
+    dim3 grid(div_up(n_bytes, block.x), div_up(m, block.y));
+
+    GenerateGenomicMatrixPackedKernelU4<<<grid, block>>>(d_matrix, m, n_bytes, 42u);
+    CUDA_CHK(cudaGetLastError());
 }
 
 // Imprime la matriz desempaquetandola en tiempo de ejecucion
@@ -323,12 +344,7 @@ int main(int argc, char *argv[]) {
     size_t tri_u32_bytes = tri_elems * sizeof(uint32_t);
     size_t tri_half_bytes = tri_elems * sizeof(half); // Bytes para half
 
-    uint8_t *h_matrix = (uint8_t*)malloc(matrix_bytes);
-
-    if (!h_matrix) {
-        fprintf(stderr, "No hay memoria de host suficiente.\n");
-        return 1;
-    }
+    uint8_t *h_matrix = NULL;
 
     uint8_t *d_matrix = NULL;
     uint32_t *d_norms = NULL;
@@ -341,11 +357,27 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMalloc(&d_distances, tri_half_bytes));
 
     printf("Generando matriz genomica empaquetada X_int4 (%d individuos x %d SNPs)...\n", m, n);
-    generate_genomic_matrix_packed(h_matrix, m, n);
 
-    // WARM UP:
-    CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
-    if (m <= 64 && n <= 128) {
+    nvtxRangePushA("GenX");
+    generate_genomic_matrix_packed_device(d_matrix, m, n);
+    CUDA_CHK(cudaDeviceSynchronize());
+    nvtxRangePop();
+
+    bool need_host_matrix = (m <= 64 && n <= 1024);
+    if (need_host_matrix) {
+        h_matrix = (uint8_t*)malloc(matrix_bytes);
+        if (!h_matrix) {
+            fprintf(stderr, "No hay memoria de host suficiente para depuracion/validacion.\n");
+            cudaFree(d_matrix);
+            cudaFree(d_norms);
+            cudaFree(d_XXT);
+            cudaFree(d_distances);
+            return 1;
+        }
+        CUDA_CHK(cudaMemcpy(h_matrix, d_matrix, matrix_bytes, cudaMemcpyDeviceToHost));
+    }
+
+    if (m <= 64 && n <= 128 && h_matrix) {
         printf("\nX (debug):\n");
         print_matrix_packed_u8(h_matrix, m, n);
     }
@@ -379,7 +411,10 @@ int main(int argc, char *argv[]) {
 
     // Loop de perfilado NVTX
     for (int i = 0; i < 10; i++) {
-        CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
+        nvtxRangePushA("GenX");
+        generate_genomic_matrix_packed_device(d_matrix, m, n);
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop();
 
         // NORMAS
         nvtxRangePushA("Norms");
@@ -405,7 +440,7 @@ int main(int argc, char *argv[]) {
     }
 
     // DEBUGS para validacion en casos pequeños
-    if (m <= 64 && n <= 1024) {
+    if (m <= 64 && n <= 1024 && h_matrix) {
         uint32_t *h_norms = (uint32_t*)malloc((size_t)m * sizeof(uint32_t));
         uint32_t *h_XXT = (uint32_t*)malloc(tri_u32_bytes);
         
@@ -435,7 +470,7 @@ int main(int argc, char *argv[]) {
     cudaFree(d_norms);
     cudaFree(d_XXT);
     cudaFree(d_distances);
-    free(h_matrix);
+    if (h_matrix) free(h_matrix);
 
     return 0;
 }

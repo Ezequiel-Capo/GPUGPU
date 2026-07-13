@@ -202,13 +202,31 @@ __global__ void CalculateNormVector(const uint8_t *matrix, uint32_t *norms,
     }
 }
 
-void generate_genomic_matrix(uint8_t *matrix, int m, int n) {
-    srand(42);
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n; j++) {
-            matrix[i * n + j] = rand() % 3;
-        }
-    }
+__device__ static inline uint32_t hash_u32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+__global__ void GenerateGenomicMatrixKernelU8(uint8_t *matrix, int m, int n, uint32_t seed) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row >= m || col >= n) return;
+
+    uint32_t key = seed ^ ((uint32_t)row * 0x9e3779b9u) ^ ((uint32_t)col * 0x85ebca6bu);
+    matrix[(size_t)row * (size_t)n + (size_t)col] = (uint8_t)(hash_u32(key) % 3u);
+}
+
+void generate_genomic_matrix_device(uint8_t *d_matrix, int m, int n) {
+    dim3 block(32, 8);
+    dim3 grid(div_up(n, block.x), div_up(m, block.y));
+
+    GenerateGenomicMatrixKernelU8<<<grid, block>>>(d_matrix, m, n, 42u);
+    CUDA_CHK(cudaGetLastError());
 }
 
 void print_packed_matrix_u32(const uint32_t *matrix, int m) {
@@ -288,11 +306,7 @@ int main(int argc, char *argv[]) {
     size_t tri_u32_bytes = tri_elems * sizeof(uint32_t); // Cambiado a uint32_t
     size_t tri_half_bytes = tri_elems * sizeof(half);
 
-    uint8_t *h_matrix = (uint8_t*)malloc(matrix_bytes);
-    if (!h_matrix) { 
-        fprintf(stderr, "No hay memoria de host suficiente.\n");
-        return 1;
-    }
+    uint8_t *h_matrix = NULL;
 
     uint8_t *d_matrix = NULL;
     uint32_t *d_norms = NULL;      // Cambiado a uint32_t
@@ -305,10 +319,27 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMalloc(&d_distances, tri_half_bytes));
 
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
-    generate_genomic_matrix(h_matrix, m, n);
 
-    CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
-    if (m <= 64 && n <= 128) {
+    nvtxRangePushA("GenX");
+    generate_genomic_matrix_device(d_matrix, m, n);
+    CUDA_CHK(cudaDeviceSynchronize());
+    nvtxRangePop();
+
+    bool need_host_matrix = (m <= 64 && n <= 1024);
+    if (need_host_matrix) {
+        h_matrix = (uint8_t*)malloc(matrix_bytes);
+        if (!h_matrix) {
+            fprintf(stderr, "No hay memoria de host suficiente para depuracion/validacion.\n");
+            cudaFree(d_matrix);
+            cudaFree(d_norms);
+            cudaFree(d_XXT);
+            cudaFree(d_distances);
+            return 1;
+        }
+        CUDA_CHK(cudaMemcpy(h_matrix, d_matrix, matrix_bytes, cudaMemcpyDeviceToHost));
+    }
+
+    if (m <= 64 && n <= 128 && h_matrix) {
         printf("\nX (debug):\n");
         print_matrix_u8(h_matrix, m, n);
     }
@@ -341,7 +372,10 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaDeviceSynchronize());
     
     for (int i = 0; i < 10; i++) {
-        CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
+        nvtxRangePushA("GenX");
+        generate_genomic_matrix_device(d_matrix, m, n);
+        CUDA_CHK(cudaDeviceSynchronize());
+        nvtxRangePop();
 
         nvtxRangePushA("Norms");
         CalculateNormVector<<<grid_norms, block_norms>>>(d_matrix, d_norms, m, n);
@@ -366,13 +400,13 @@ int main(int argc, char *argv[]) {
         nvtxRangePop(); 
     }
     
-    if (m <= 64 && n <= 1024) {
-        uint32_t *h_norms = (uint32_t*)malloc((size_t)m * sizeof(uint32_t)); // Cambiado a uint32_t
-        uint32_t *h_XXT = NULL;                                             // Cambiado a uint32_t
-        CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    if (m <= 64 && n <= 1024 && h_matrix) {
+        uint32_t *h_norms = (uint32_t*)malloc((size_t)m * sizeof(uint32_t));
+        uint32_t *h_XXT = NULL;
         if (!h_norms) {
             fprintf(stderr, "No hay memoria de host para validar normas.\n");
         } else {
+            CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(uint32_t), cudaMemcpyDeviceToHost));
             printf("Normas (debug):\n");
             for (int i = 0; i < m; i++) {
                 printf("%u ", h_norms[i]);
@@ -383,7 +417,7 @@ int main(int argc, char *argv[]) {
         h_XXT = (uint32_t*)malloc(tri_u32_bytes);
         if (!h_XXT) {
             fprintf(stderr, "No hay memoria de host para validar XXT.\n");
-        } else {
+        } else if (h_norms) {
             CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, tri_u32_bytes, cudaMemcpyDeviceToHost)); 
 
             bool ok = validate_small_case(h_matrix, h_XXT, h_norms, m, n);
@@ -407,7 +441,7 @@ int main(int argc, char *argv[]) {
     cudaFree(d_norms);
     cudaFree(d_XXT);
     cudaFree(d_distances);
-    free(h_matrix);
+    if (h_matrix) free(h_matrix);
 
     return 0;
 }

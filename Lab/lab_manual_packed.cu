@@ -77,6 +77,48 @@ static inline void set_packed_genotype(uint8_t *matrix, int packed_cols, int row
     matrix[byte_index] = (uint8_t)((matrix[byte_index] & ~mask) | encoded);
 }
 
+__device__ static inline uint32_t hash_u32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+__global__ void GenerateGenomicMatrixPackedKernel(uint8_t *matrix, int m, int n, int packed_cols, uint32_t seed) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int byte_col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row >= m || byte_col >= packed_cols) return;
+
+    int base_col = byte_col * VALUES_PER_BYTE;
+    uint8_t packed = 0;
+
+#pragma unroll
+    for (int lane = 0; lane < VALUES_PER_BYTE; lane++) {
+        int col = base_col + lane;
+        uint8_t value = 0;
+
+        if (col < n) {
+            uint32_t key = seed ^ ((uint32_t)row * 0x9e3779b9u) ^ ((uint32_t)col * 0x85ebca6bu);
+            value = (uint8_t)(hash_u32(key) % 3u);
+        }
+
+        packed |= (uint8_t)((value & PACKED_VALUE_MASK) << (lane * BITS_PER_VALUE));
+    }
+
+    matrix[(size_t)row * (size_t)packed_cols + (size_t)byte_col] = packed;
+}
+
+void generate_genomic_matrix_packed_device(uint8_t *d_matrix, int m, int n, int packed_cols) {
+    dim3 block(32, 8);
+    dim3 grid(div_up(packed_cols, block.x), div_up(m, block.y));
+
+    GenerateGenomicMatrixPackedKernel<<<grid, block>>>(d_matrix, m, n, packed_cols, 42u);
+    CUDA_CHK(cudaGetLastError());
+}
+
 // Convierte 1 byte (4 genotipos de 2 bits) en un entero sin signo de 32 bits listo para __dp4a
 __host__ __device__ static inline uint32_t unpack_2bit_to_4x8(uint8_t packed_byte) {
     uint32_t g0 = packed_byte & 0x03u;
@@ -204,17 +246,6 @@ __global__ void CalculateNormVectorPacked(const uint8_t *matrix, uint32_t *norms
     }
 }
 
-void generate_genomic_matrix_packed(uint8_t *matrix, int m, int n, int packed_cols) {
-    srand(42);
-    memset(matrix, 0, (size_t)m * (size_t)packed_cols * sizeof(uint8_t));
-
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n; j++) {
-            set_packed_genotype(matrix, packed_cols, i, j, (uint8_t)(rand() % 3));
-        }
-    }
-}
-
 void print_matrix_packed_u8(const uint8_t *matrix, int rows, int cols, int packed_cols) {
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
@@ -290,12 +321,7 @@ int main(int argc, char *argv[]) {
     size_t tri_u32_bytes = triangular_elems * sizeof(uint32_t);
     size_t tri_half_bytes = triangular_elems * sizeof(half);
 
-    uint8_t *h_matrix = (uint8_t*)malloc(packed_matrix_bytes);
-
-    if (!h_matrix) {
-        fprintf(stderr, "No hay memoria de host suficiente.\n");
-        return 1;
-    }
+    uint8_t *h_matrix = NULL;
 
     uint8_t *d_matrix = NULL;
     uint32_t *d_norms = NULL;
@@ -310,11 +336,25 @@ int main(int argc, char *argv[]) {
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
     printf("Matriz X empaquetada: %zu bytes (sin empaquetar: %zu bytes).\n", packed_matrix_bytes, unpacked_matrix_bytes);
     printf("Matriz Salida Comprimida Triangular: %zu elementos.\n", triangular_elems);
-    
-    generate_genomic_matrix_packed(h_matrix, m, n, packed_cols);
-    CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, packed_matrix_bytes, cudaMemcpyHostToDevice));
+    nvtxRangePushA("GenX");
+    generate_genomic_matrix_packed_device(d_matrix, m, n, packed_cols);
+    CUDA_CHK(cudaDeviceSynchronize());
+    nvtxRangePop();
+    bool need_host_matrix = (m <= 64 && n <= 1024);
+    if (need_host_matrix) {
+        h_matrix = (uint8_t*)malloc(packed_matrix_bytes);
+        if (!h_matrix) {
+            fprintf(stderr, "No hay memoria de host suficiente para depuracion/validacion.\n");
+            cudaFree(d_matrix);
+            cudaFree(d_norms);
+            cudaFree(d_XXT_packed);
+            cudaFree(d_distances_packed);
+            return 1;
+        }
+        CUDA_CHK(cudaMemcpy(h_matrix, d_matrix, packed_matrix_bytes, cudaMemcpyDeviceToHost));
+    }
 
-    if (m <= 64 && n <= 128) {
+    if (m <= 64 && n <= 128 && h_matrix) {
         printf("\nX desempaquetada (debug):\n");
         print_matrix_packed_u8(h_matrix, m, n, packed_cols);
     }
@@ -353,7 +393,7 @@ int main(int argc, char *argv[]) {
     printf("Cálculos completados con éxito.\n");
 
     // DEBUGS, casos pequeños
-    if (m <= 64 && n <= 1024) {
+    if (m <= 64 && n <= 1024 && h_matrix) {
         uint32_t *h_norms = (uint32_t*)malloc((size_t)m * sizeof(uint32_t));
         uint32_t *h_XXT_packed = (uint32_t*)malloc(tri_u32_bytes);
         CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(uint32_t), cudaMemcpyDeviceToHost));
@@ -382,7 +422,7 @@ int main(int argc, char *argv[]) {
     cudaFree(d_norms);
     cudaFree(d_XXT_packed);
     cudaFree(d_distances_packed);
-    free(h_matrix);
+    if (h_matrix) free(h_matrix);
 
     return 0;
 }
