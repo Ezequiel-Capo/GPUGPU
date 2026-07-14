@@ -360,7 +360,7 @@ int main(int argc, char *argv[]) {
 
     if (m <= 64 && n <= 128 && h_matrix) {
         printf("\nX (debug):\n");
-        print_matrix_packed_u8(h_matrix, m, n);
+        print_matrix_u8(h_matrix, m, n);
     }
 
     // NORMAS
