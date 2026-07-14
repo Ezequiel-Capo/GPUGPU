@@ -10,16 +10,12 @@
 using namespace nvcuda;
 
 // Dimensiones obligatorias para usar la API WMMA en u4: M=8, N=8, K=32
-#define WARP_TILE_M 2
-#define WARP_TILE_N 2
 #define WMMA_M 8
 #define WMMA_N 8
 #define WMMA_K 32
 #define WARP_SIZE 32
-#define TILE_M (WARP_TILE_M * WMMA_M)       // Sigue siendo 16
-#define TILE_N (WARP_TILE_N * WMMA_N)       // Sigue siendo 16
-#define WARPS_PER_BLOCK (WARP_TILE_M * WARP_TILE_N)
-#define THREADS_PER_BLOCK (WARPS_PER_BLOCK * WARP_SIZE)
+#define WARPS_PER_BLOCK_MAX (4 * 4)
+#define THREADS_PER_BLOCK_MAX (WARPS_PER_BLOCK_MAX * WARP_SIZE)
 
 // K requiere 32 elementos lógicos, que equivalen a 16 bytes físicos
 #define SHMEM_K_BYTES 16
@@ -31,14 +27,6 @@ using namespace nvcuda;
 
 #define SHMEM_C_N (TILE_N + 8)
 
-#if (WARP_TILE_M < 1) || (WARP_TILE_N < 1)
-#error "WARP_TILE_M y WARP_TILE_N deben ser al menos 1."
-#endif
-
-#if THREADS_PER_BLOCK > 1024
-#error "Demasiados warps por bloque: THREADS_PER_BLOCK no puede superar 1024."
-#endif
-
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true) {
@@ -48,7 +36,9 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
     }
 }
 
-static inline int div_up(int a, int b) {
+
+
+static inline size_t div_up_size(size_t a, size_t b) {
     return (a + b - 1) / b;
 }
 
@@ -86,8 +76,17 @@ __global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms, ha
     }
 }
 
-// XXT = X * X^T usando Tensor Cores de 4 bits (u4). Modificado para guardar en uint32_t.
+template <int WARP_TILE_M, int WARP_TILE_N>
 __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, size_t m, size_t n) {
+    constexpr int TILE_M = WARP_TILE_M * WMMA_M;
+    constexpr int TILE_N = WARP_TILE_N * WMMA_N;
+    constexpr int WARPS_PER_BLOCK = WARP_TILE_M * WARP_TILE_N;
+    constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+
+    static_assert(WARP_TILE_M >= 1 && WARP_TILE_N >= 1, "WARP_TILE_M y WARP_TILE_N deben ser al menos 1.");
+    static_assert(WARP_TILE_M <= 4 && WARP_TILE_N <= 4, "u4 solo soporta configuraciones 2x2 o 4x4.");
+    static_assert(THREADS_PER_BLOCK <= 1024, "Demasiados warps por bloque.");
+
     size_t row_base = (size_t)blockIdx.y * TILE_M;
     size_t col_base = (size_t)blockIdx.x * TILE_N;
 
@@ -171,6 +170,28 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, size_t m, size_t 
             size_t packed_idx = get_packed_index(global_row, global_col, m);
             C[packed_idx] = (uint32_t)c_tile[local_row][local_col]; 
         }
+    }
+}
+
+template <int WTM, int WTN>
+void launch_XXT(const uint8_t* d_matrix, uint32_t* d_XXT, size_t m, size_t n) {
+    constexpr int TILE_M = WTM * WMMA_M;
+    constexpr int TILE_N = WTN * WMMA_N;
+    constexpr int THREADS_PER_BLOCK = WTM * WTN * WARP_SIZE;
+
+    dim3 block_syrk(THREADS_PER_BLOCK);
+    dim3 grid_syrk((unsigned)div_up_size(m, (size_t)TILE_N), (unsigned)div_up_size(m, (size_t)TILE_M));
+    XXT_WMMA_Shared<WTM, WTN><<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
+}
+
+void dispatch_XXT(const uint8_t* d_matrix, uint32_t* d_XXT, size_t m, size_t n, int wtm, int wtn) {
+    if (wtm == 2 && wtn == 2) {
+        launch_XXT<2, 2>(d_matrix, d_XXT, m, n);
+    } else if (wtm == 4 && wtn == 4) {
+        launch_XXT<4, 4>(d_matrix, d_XXT, m, n);
+    } else {
+        fprintf(stderr, "Error: Configuracion WMMA u4 no soportada (%dx%d). Use 2x2 o 4x4.\n", wtm, wtn);
+        exit(1);
     }
 }
 
@@ -324,16 +345,30 @@ void print_matrix_packed_half(const half *matrix, int m) {
 int main(int argc, char *argv[]) {
     size_t m = (size_t)(1 << 10);  // individuos
     size_t n = (size_t)(1 << 15);  // SNPs (Debe ser multiplo de 32 para WMMA_K)
+    int warp_m = 4; //performante por defecto
+    int warp_n = 4;
 
-    if (argc >= 3) {
+    if (argc >= 5) {
+        m = (size_t)strtoull(argv[1], NULL, 10);
+        n = (size_t)strtoull(argv[2], NULL, 10);
+        warp_m = atoi(argv[3]);
+        warp_n = atoi(argv[4]);
+    } else if (argc >= 3) {
         m = (size_t)strtoull(argv[1], NULL, 10);
         n = (size_t)strtoull(argv[2], NULL, 10);
     }
 
     if (m == 0 || n == 0 || n % 32 != 0) {
-        fprintf(stderr, "Uso: %s [individuos m] [SNPs n (multiplo de 32)]\n", argv[0]);
+        fprintf(stderr, "Uso: %s [individuos m] [SNPs n (multiplo de 32)] [warp_m] [warp_n]\n", argv[0]);
         return 1;
     }
+
+    if (!((warp_m == 2 && warp_n == 2) || (warp_m == 4 && warp_n == 4))) {
+        fprintf(stderr, "Error: u4 solo soporta warp_m/warp_n iguales a 2x2 o 4x4.\n");
+        return 1;
+    }
+
+    printf("Iniciando con configuracion WMMA u4: Warp %dx%d | Size %dx%dx%d\n", warp_m, warp_n, WMMA_M, WMMA_N, WMMA_K);
 
     // 1. Memoria de la matriz de entrada (Reduccion 4-bits)
     size_t matrix_elems = (size_t)m * (size_t)n;
@@ -393,9 +428,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaMemset(d_XXT, 0, tri_u32_bytes));
 
     // X*X^T -----------------------------------------------------
-    dim3 block_syrk(THREADS_PER_BLOCK);
-    dim3 grid_syrk((unsigned)div_up_size(m, TILE_N), (unsigned)div_up_size(m, TILE_M));
-    XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
+    dispatch_XXT(d_matrix, d_XXT, m, n, warp_m, warp_n);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
@@ -423,7 +456,8 @@ int main(int argc, char *argv[]) {
 
         // XXT WMMA int4
         nvtxRangePushA("XXT");
-        XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
+        dispatch_XXT(d_matrix, d_XXT, m, n, warp_m, warp_n);
+        CUDA_CHK(cudaGetLastError());
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
