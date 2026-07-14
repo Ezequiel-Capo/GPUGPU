@@ -336,10 +336,12 @@ int main(int argc, char *argv[]) {
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
     printf("Matriz X empaquetada: %zu bytes (sin empaquetar: %zu bytes).\n", packed_matrix_bytes, unpacked_matrix_bytes);
     printf("Matriz Salida Comprimida Triangular: %zu elementos.\n", triangular_elems);
+    
     nvtxRangePushA("GenX");
     generate_genomic_matrix_packed_device(d_matrix, m, n, packed_cols);
     CUDA_CHK(cudaDeviceSynchronize());
     nvtxRangePop();
+    
     bool need_host_matrix = (m <= 64 && n <= 1024);
     if (need_host_matrix) {
         h_matrix = (uint8_t*)malloc(packed_matrix_bytes);

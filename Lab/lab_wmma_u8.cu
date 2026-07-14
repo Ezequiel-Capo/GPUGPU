@@ -53,15 +53,19 @@ static inline int div_up(int a, int b) {
     return (a + b - 1) / b;
 }
 
+static inline size_t div_up_size(size_t a, size_t b) {
+    return (a + b - 1) / b;
+}
+
 static __device__ __host__ inline size_t get_packed_index(size_t r, size_t c, size_t m) {
     return r * m - (r * (r + 1)) / 2 + c;
 }
 
 // DISTANCIAS EUCLIDEAS CON INPUTS UNSIGNED INT
 __global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms,
-                                  half *distances, int m) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+                                  half *distances, size_t m) {
+    size_t row = (size_t)blockIdx.y * blockDim.y + threadIdx.y;
+    size_t col = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < m && col < m && row <= col) {
         size_t packed_idx = get_packed_index(row, col, m);
@@ -82,21 +86,22 @@ __global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms,
 }
 
 // XXT 
-__global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, int m, int n) {
+__global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, size_t m, size_t n) {
 
-    int row_base = blockIdx.y * TILE_M;
-    int col_base = blockIdx.x * TILE_N;
+    size_t row_base = (size_t)blockIdx.y * TILE_M;
+    size_t col_base = (size_t)blockIdx.x * TILE_N;
 
     if (col_base + TILE_N <= row_base) return;
 
     int warp_id = threadIdx.x / WARP_SIZE;
-    int warp_tile_row = warp_id / WARP_TILE_N;
-    int warp_tile_col = warp_id % WARP_TILE_N;
+    size_t warp_tile_row = (size_t)warp_id / WARP_TILE_N;
+    size_t warp_tile_col = (size_t)warp_id % WARP_TILE_N;
 
-    int subtile_row = row_base + warp_tile_row * WMMA_M;
-    int subtile_col = col_base + warp_tile_col * WMMA_N;
+    size_t subtile_row = row_base + warp_tile_row * WMMA_M;
+    size_t subtile_col = col_base + warp_tile_col * WMMA_N;
 
     bool compute_subtile = (subtile_col + WMMA_N > subtile_row);
+    size_t n_size = n;
 
     __shared__ __align__(32) uint8_t a_tile[TILE_M][SHMEM_K];
     __shared__ __align__(32) uint8_t b_tile[TILE_N][SHMEM_K];
@@ -110,23 +115,23 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, int m, int n) {
 
     wmma::fill_fragment(c_frag, 0);
 
-    for (int k0 = 0; k0 < n; k0 += WMMA_K) {
+    for (size_t k0 = 0; k0 < n; k0 += WMMA_K) {
         for (int idx = threadIdx.x; idx < TILE_M * WMMA_K; idx += blockDim.x) {
             int local_row = idx / WMMA_K;
             int local_k = idx % WMMA_K;
-            int global_k = k0 + local_k;
-            int a_row = row_base + local_row;
+            size_t global_k = k0 + (size_t)local_k;
+            size_t a_row = row_base + (size_t)local_row;
 
-            a_tile[local_row][local_k] = (a_row < m && global_k < n) ? X[a_row * n + global_k] : 0;
+            a_tile[local_row][local_k] = (a_row < m && global_k < n) ? X[a_row * n_size + global_k] : 0;
         }
 
         for (int idx = threadIdx.x; idx < TILE_N * WMMA_K; idx += blockDim.x) {
             int local_row = idx / WMMA_K;
             int local_k = idx % WMMA_K;
-            int global_k = k0 + local_k;
-            int b_row = col_base + local_row;
+            size_t global_k = k0 + (size_t)local_k;
+            size_t b_row = col_base + (size_t)local_row;
 
-            b_tile[local_row][local_k] = (b_row < m && global_k < n) ? X[b_row * n + global_k] : 0;
+            b_tile[local_row][local_k] = (b_row < m && global_k < n) ? X[b_row * n_size + global_k] : 0;
         }
 
         __syncthreads();
@@ -143,18 +148,18 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, int m, int n) {
     }
 
     if (compute_subtile) {
-        int local_row = warp_tile_row * WMMA_M;
-        int local_col = warp_tile_col * WMMA_N;
+        size_t local_row = warp_tile_row * WMMA_M;
+        size_t local_col = warp_tile_col * WMMA_N;
         wmma::store_matrix_sync(&c_tile[local_row][local_col], c_frag, SHMEM_C_N, wmma::mem_row_major);
     }
 
     __syncthreads();
 
     for (int idx = threadIdx.x; idx < TILE_M * TILE_N; idx += blockDim.x) {
-        int local_row = idx / TILE_N;
-        int local_col = idx % TILE_N;
-        int global_row = row_base + local_row;
-        int global_col = col_base + local_col;
+        size_t local_row = (size_t)idx / TILE_N;
+        size_t local_col = (size_t)idx % TILE_N;
+        size_t global_row = row_base + local_row;
+        size_t global_col = col_base + local_col;
 
         if (global_row < m && global_col < m && global_row <= global_col) {
             size_t packed_idx = get_packed_index(global_row, global_col, m);
@@ -171,13 +176,15 @@ __inline__ __device__ uint32_t warpReduceSum(uint32_t val) {
 }
 
 __global__ void CalculateNormVector(const uint8_t *matrix, uint32_t *norms,
-                                    int m, int n) {
-    int row = blockIdx.x;
+                                    size_t m, size_t n) {
+    size_t row = blockIdx.x;
     if (row >= m) return;
 
     uint32_t local_norm = 0;
-    for (int col = threadIdx.x; col < n; col += blockDim.x) {
-        uint32_t v = matrix[row * n + col];
+    size_t n_size = (size_t)n;
+    size_t row_offset = (size_t)row * n_size;
+    for (size_t col = (size_t)threadIdx.x; col < n; col += (size_t)blockDim.x) {
+        uint32_t v = matrix[row_offset + (size_t)col];
         local_norm += v * v;
     }
 
@@ -211,9 +218,9 @@ __device__ static inline uint32_t hash_u32(uint32_t x) {
     return x;
 }
 
-__global__ void GenerateGenomicMatrixKernelU8(uint8_t *matrix, int m, int n, uint32_t seed) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void GenerateGenomicMatrixKernelU8(uint8_t *matrix, size_t m, size_t n, uint32_t seed) {
+    size_t row = (size_t)blockIdx.y * blockDim.y + threadIdx.y;
+    size_t col = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row >= m || col >= n) return;
 
@@ -221,9 +228,9 @@ __global__ void GenerateGenomicMatrixKernelU8(uint8_t *matrix, int m, int n, uin
     matrix[(size_t)row * (size_t)n + (size_t)col] = (uint8_t)(hash_u32(key) % 3u);
 }
 
-void generate_genomic_matrix_device(uint8_t *d_matrix, int m, int n) {
+void generate_genomic_matrix_device(uint8_t *d_matrix, size_t m, size_t n) {
     dim3 block(32, 8);
-    dim3 grid(div_up(n, block.x), div_up(m, block.y));
+    dim3 grid((unsigned)div_up_size(n, (size_t)block.x), (unsigned)div_up_size(m, (size_t)block.y));
 
     GenerateGenomicMatrixKernelU8<<<grid, block>>>(d_matrix, m, n, 42u);
     CUDA_CHK(cudaGetLastError());
@@ -258,11 +265,12 @@ void print_matrix_u8(const uint8_t *matrix, int rows, int cols) {
     }
 }
 
-bool validate_small_case(const uint8_t *X, const uint32_t *XXT, const uint32_t *norms, int m, int n) {
-    for (int i = 0; i < m; i++) {
+bool validate_small_case(const uint8_t *X, const uint32_t *XXT, const uint32_t *norms, size_t m, size_t n) {
+    size_t n_size = n;
+    for (size_t i = 0; i < m; i++) {
         uint32_t ref_norm = 0;
-        for (int k = 0; k < n; k++) {
-            uint32_t v = X[i * n + k];
+        for (size_t k = 0; k < n; k++) {
+            uint32_t v = X[i * n_size + k];
             ref_norm += v * v;
         }
         if (norms[i] != ref_norm) {
@@ -270,10 +278,10 @@ bool validate_small_case(const uint8_t *X, const uint32_t *XXT, const uint32_t *
             return false;
         }
 
-        for (int j = i; j < m; j++) {
+        for (size_t j = i; j < m; j++) {
             uint32_t ref = 0;
-            for (int k = 0; k < n; k++) 
-                ref += (uint32_t)X[i * n + k] * (uint32_t)X[j * n + k];
+            for (size_t k = 0; k < n; k++) 
+                ref += (uint32_t)X[i * n_size + k] * (uint32_t)X[j * n_size + k];
             
             size_t packed_idx = get_packed_index(i, j, m);
             if (XXT[packed_idx] != ref) {
@@ -286,23 +294,23 @@ bool validate_small_case(const uint8_t *X, const uint32_t *XXT, const uint32_t *
 }
 
 int main(int argc, char *argv[]) {
-    int m = (1 << 10);  
-    int n = (1 << 15);  
+    size_t m = (size_t)(1 << 10);  
+    size_t n = (size_t)(1 << 15);  
 
     if (argc >= 3) {
         m = atoi(argv[1]);
         n = atoi(argv[2]);
     }
 
-    if (m <= 0 || n <= 0) {
+    if (m == 0 || n == 0) {
         fprintf(stderr, "Uso: %s [individuos m] [SNPs n]\n", argv[0]);
         return 1;
     }
 
-    size_t matrix_elems = (size_t)m * (size_t)n;
+    size_t matrix_elems = m * n;
     size_t matrix_bytes = matrix_elems * sizeof(uint8_t);
     
-    size_t tri_elems = (size_t)m * (m + 1) / 2;
+    size_t tri_elems = m * (m + 1) / 2;
     size_t tri_u32_bytes = tri_elems * sizeof(uint32_t); // Cambiado a uint32_t
     size_t tri_half_bytes = tri_elems * sizeof(half);
 
@@ -314,11 +322,11 @@ int main(int argc, char *argv[]) {
     half *d_distances = NULL; 
 
     CUDA_CHK(cudaMalloc(&d_matrix, matrix_bytes));
-    CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(uint32_t))); // Cambiado a uint32_t
+    CUDA_CHK(cudaMalloc(&d_norms, m * sizeof(uint32_t)));
     CUDA_CHK(cudaMalloc(&d_XXT, tri_u32_bytes));
     CUDA_CHK(cudaMalloc(&d_distances, tri_half_bytes));
 
-    printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
+    printf("Generando matriz genomica X (%zu individuos x %zu SNPs)...\n", m, n);
 
     nvtxRangePushA("GenX");
     generate_genomic_matrix_device(d_matrix, m, n);
@@ -346,7 +354,7 @@ int main(int argc, char *argv[]) {
 
     // NORMAS
     dim3 block_norms(256);
-    dim3 grid_norms(m);
+    dim3 grid_norms((unsigned)m);
     CalculateNormVector<<<grid_norms, block_norms>>>(d_matrix, d_norms, m, n);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
@@ -356,7 +364,7 @@ int main(int argc, char *argv[]) {
 
     // X*X^T
     dim3 block_syrk(THREADS_PER_BLOCK);
-    dim3 grid_syrk(div_up(m, TILE_N), div_up(m, TILE_M));
+    dim3 grid_syrk((unsigned)div_up_size(m, TILE_N), (unsigned)div_up_size(m, TILE_M));
     XXT_WMMA_Shared<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
@@ -366,16 +374,12 @@ int main(int argc, char *argv[]) {
 
     // DISTANCIAS
     dim3 block_dist(16, 16);
-    dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
+    dim3 grid_dist((unsigned)div_up_size(m, (size_t)block_dist.x), (unsigned)div_up_size(m, (size_t)block_dist.y));
     CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
     
     for (int i = 0; i < 10; i++) {
-        nvtxRangePushA("GenX");
-        generate_genomic_matrix_device(d_matrix, m, n);
-        CUDA_CHK(cudaDeviceSynchronize());
-        nvtxRangePop();
 
         nvtxRangePushA("Norms");
         CalculateNormVector<<<grid_norms, block_norms>>>(d_matrix, d_norms, m, n);
