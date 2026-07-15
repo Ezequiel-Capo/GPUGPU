@@ -347,6 +347,7 @@ int main(int argc, char *argv[]) {
     size_t n = (size_t)(1 << 15);  // SNPs (Debe ser multiplo de 32 para WMMA_K)
     int warp_m = 4; //performante por defecto
     int warp_n = 4;
+    printf("Memoria usada: %.2f MB\n", (float)(m * n * 0.5f) / (1024.0f * 1024.0f));
 
     if (argc >= 5) {
         m = (size_t)strtoull(argv[1], NULL, 10);

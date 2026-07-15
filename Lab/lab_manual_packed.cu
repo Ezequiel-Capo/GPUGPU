@@ -301,6 +301,7 @@ void print_matrix_half(const half *matrix_packed, int m) {
 int main(int argc, char *argv[]) {
     int m = (1 << 10);  // individuos
     int n = (1 << 15);  // SNPs
+    printf("Memoria usada: %.2f MB\n", (float)(m * n * 0.25f) / (1024.0f * 1024.0f));
 
     if (argc >= 3) {
         m = atoi(argv[1]);

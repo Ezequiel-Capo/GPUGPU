@@ -298,7 +298,8 @@ bool validate_small_case(const uint8_t *X, const uint32_t *XXT, const uint32_t *
 int main(int argc, char *argv[]) {
     size_t m = (size_t)(1 << 10);  
     size_t n = (size_t)(1 << 15);  
-    
+    printf("Memoria usada: %.2f MB\n", (float)(m * n * sizeof(uint8_t)) / (1024.0f * 1024.0f));
+
     // Parámetros por defecto para WMMA
     int warp_m = 4, warp_n = 4; //mas perform 
     int wmma_m = 16, wmma_n = 16, wmma_k = 16;

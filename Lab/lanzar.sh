@@ -35,6 +35,9 @@ case "$exe" in
     "./error_numerico")
         nvcc -O3 -arch=sm_75 -o "$run_exe" error_numerico.cu
         ;;
+    "./cublas")
+        nvcc -O3 -arch=sm_75 -o "$run_exe" cublas.cu -lcublas -lnvToolsExt
+        ;;    
     *)
         echo "Error: ejecutable no soportado: $exe"
         exit 1
