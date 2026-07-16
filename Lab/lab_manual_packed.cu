@@ -26,6 +26,7 @@
 #define VALUES_PER_BYTE 4
 #define BITS_PER_VALUE 2
 #define PACKED_VALUE_MASK 0x03u
+#define GENOMIC_MATRIX_SEED 42u
 
 #define SYMRK_BLOCK_X 16
 #define SYMRK_BLOCK_Y 16
@@ -114,7 +115,7 @@ void generate_genomic_matrix_packed_device(uint8_t *d_matrix, int m, int n, int 
     dim3 block(32, 8);
     dim3 grid(div_up(packed_cols, block.x), div_up(m, block.y));
 
-    GenerateGenomicMatrixPackedKernel<<<grid, block>>>(d_matrix, m, n, packed_cols, 42u);
+    GenerateGenomicMatrixPackedKernel<<<grid, block>>>(d_matrix, m, n, packed_cols, GENOMIC_MATRIX_SEED);
     CUDA_CHK(cudaGetLastError());
 }
 
