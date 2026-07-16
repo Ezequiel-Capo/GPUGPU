@@ -2,8 +2,8 @@
 
 ## Implementaciones Multiplicacion XXT 
 
-- WMMA uint4,uint4,int
-- WMMA uint8,uint8,int
+- WMMA uint4
+- WMMA uint8
 - __dp4a empaquetado uint2
 - cuBlas Syrk
 
