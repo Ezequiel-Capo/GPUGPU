@@ -153,13 +153,6 @@ __global__ void u8ToFloatKernel(const uint8_t* in, float* out, size_t count) {
     if (idx < count) out[idx] = (float)in[idx];
 }
 
-// Convierte distancias en half (como las que calculan CalculateDistanceU8/U4/U2)
-// a float, para poder usar cublasSaxpy/cublasSnrm2 (no hay BLAS-1 en half precision).
-__global__ void halfToFloatKernel(const half* in, float* out, size_t count) {
-    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < count) out[idx] = __half2float(in[idx]);
-}
-
 // cublasSsyrk con CUBLAS_FILL_MODE_UPPER solo llena, en terminos row-major, la mitad
 // con fila >= columna (ver detalle discutido: la convencion column-major de cuBLAS
 // mapea al reves de lo intuitivo cuando se lee el buffer como row-major). Este kernel
@@ -193,10 +186,10 @@ __global__ void buildDPackedKernel(const float* C, const float* diag, float* Dpa
 }
 
 // Imprime en consola: ||D_variante - D_cuBLAS||_2 usando cublasSaxpy + cublasSnrm2,
-// tal como pide la letra. d_distances_half es el resultado empaquetado en half de
-// cada variante (U8/U4/U2); d_Dpacked_ref es la referencia float32 de cuBLAS.
+// tal como pide la letra. d_distances_float es el resultado en float de cada
+// variante (U8/U4/U2); d_Dpacked_ref es la referencia float32 de cuBLAS.
 void verificar_contra_cublas(cublasHandle_t handle, const char* nombre_variante,
-                              const half* d_distances_half, const float* d_Dpacked_ref,
+                              const float* d_distances_float, const float* d_Dpacked_ref,
                               size_t tri_elems) {
     if (tri_elems > (size_t)INT_MAX) {
         fprintf(stderr, "[WARN] tri_elems excede INT_MAX, cublasSaxpy/Snrm2 no lo soportan tal cual.\n");
@@ -205,11 +198,7 @@ void verificar_contra_cublas(cublasHandle_t handle, const char* nombre_variante,
 
     float *d_variant_f = NULL;
     CUDA_CHK(cudaMalloc(&d_variant_f, tri_elems * sizeof(float)));
-
-    int threads = 256;
-    int blocks = (int)((tri_elems + threads - 1) / threads);
-    halfToFloatKernel<<<blocks, threads>>>(d_distances_half, d_variant_f, tri_elems);
-    CUDA_CHK(cudaGetLastError());
+    CUDA_CHK(cudaMemcpy(d_variant_f, d_distances_float, tri_elems * sizeof(float), cudaMemcpyDeviceToDevice));
 
     float neg_one = -1.0f;
     // d_variant_f = d_variant_f - d_Dpacked_ref  =  D_variante - D_cuBLAS
@@ -226,7 +215,7 @@ void verificar_contra_cublas(cublasHandle_t handle, const char* nombre_variante,
 // ====================================================================================
 // KERNELS - VERSION U8
 // ====================================================================================
-__global__ void CalculateDistanceU8(const uint32_t *XXT, const uint32_t *norms, half *distances, int m) {
+__global__ void CalculateDistanceU8(const uint32_t *XXT, const uint32_t *norms, float *distances, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -243,7 +232,7 @@ __global__ void CalculateDistanceU8(const uint32_t *XXT, const uint32_t *norms, 
             dist_f = sqrtf((float)(sum_norms - 2 * xxt));
         }
         
-        distances[packed_idx] = __float2half(dist_f);
+        distances[packed_idx] = dist_f;
     }
 }
 
@@ -362,7 +351,7 @@ __global__ void CalculateNormVectorU8(const uint8_t *matrix, uint32_t *norms, in
 // ====================================================================================
 // KERNELS - VERSION U4
 // ====================================================================================
-__global__ void CalculateDistanceU4(const uint32_t *XXT, const uint32_t *norms, half *distances, int m) {
+__global__ void CalculateDistanceU4(const uint32_t *XXT, const uint32_t *norms, float *distances, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -379,7 +368,7 @@ __global__ void CalculateDistanceU4(const uint32_t *XXT, const uint32_t *norms, 
             dist_f = sqrtf((float)(sum_norms - 2 * xxt));
         }
 
-        distances[idx] = __float2half(dist_f);
+        distances[idx] = dist_f;
     }
 }
 
@@ -508,7 +497,7 @@ __global__ void CalculateNormVectorU4(const uint8_t *matrix, uint32_t *norms, in
 // ====================================================================================
 // KERNELS - VERSION U2 (MANUAL __dp4a)
 // ====================================================================================
-__global__ void CalculateDistanceU2(const uint32_t *XXT_packed, const uint32_t *norms, half *distances_packed, int m) {
+__global__ void CalculateDistanceU2(const uint32_t *XXT_packed, const uint32_t *norms, float *distances_packed, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -525,7 +514,7 @@ __global__ void CalculateDistanceU2(const uint32_t *XXT_packed, const uint32_t *
             dist_f = sqrtf((float)(sum_norms - 2 * xxt));
         }
 
-        distances_packed[idx] = __float2half(dist_f);
+        distances_packed[idx] = dist_f;
     }
 }
 
@@ -744,18 +733,18 @@ int main(int argc, char *argv[]) {
     {
         size_t matrix_bytes = (size_t)m * (size_t)n * sizeof(uint8_t);
         size_t tri_u32_bytes = tri_elems * sizeof(uint32_t); 
-        size_t tri_half_bytes = tri_elems * sizeof(half);
+        size_t tri_float_bytes = tri_elems * sizeof(float);
 
         uint8_t *h_matrix = (uint8_t*)malloc(matrix_bytes);
         uint8_t *d_matrix = NULL;
         uint32_t *d_norms = NULL;      
         uint32_t *d_XXT = NULL;        
-        half *d_distances_u8 = NULL; 
+        float *d_distances_u8 = NULL; 
 
         CUDA_CHK(cudaMalloc(&d_matrix, matrix_bytes));
         CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(uint32_t))); 
         CUDA_CHK(cudaMalloc(&d_XXT, tri_u32_bytes));
-        CUDA_CHK(cudaMalloc(&d_distances_u8, tri_half_bytes));
+        CUDA_CHK(cudaMalloc(&d_distances_u8, tri_float_bytes));
 
         generate_genomic_matrix(h_matrix, m, n);
         CUDA_CHK(cudaMemcpy(d_matrix, h_matrix, matrix_bytes, cudaMemcpyHostToDevice));
@@ -773,7 +762,7 @@ int main(int argc, char *argv[]) {
             XXT_WMMA_Shared_U8<<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
 
             // 3. Calcular Matriz de Distancias de la sección
-            CUDA_CHK(cudaMemset(d_distances_u8, 0, tri_half_bytes)); 
+            CUDA_CHK(cudaMemset(d_distances_u8, 0, tri_float_bytes)); 
             dim3 block_dist(16, 16);
             dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
             CalculateDistanceU8<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances_u8, m);
@@ -795,18 +784,18 @@ int main(int argc, char *argv[]) {
     {
         size_t matrix_bytes_u4 = ((size_t)m * (size_t)n) / 2; 
         size_t tri_u32_bytes_u4 = tri_elems * sizeof(uint32_t);
-        size_t tri_half_bytes_u4 = tri_elems * sizeof(half);
+        size_t tri_float_bytes_u4 = tri_elems * sizeof(float);
 
         uint8_t *h_matrix_u4 = (uint8_t*)malloc(matrix_bytes_u4);
         uint8_t *d_matrix_u4 = NULL;
         uint32_t *d_norms_u4 = NULL;
         uint32_t *d_XXT_u4 = NULL;
-        half *d_distances_u4 = NULL;
+        float *d_distances_u4 = NULL;
 
         CUDA_CHK(cudaMalloc(&d_matrix_u4, matrix_bytes_u4));
         CUDA_CHK(cudaMalloc(&d_norms_u4, (size_t)m * sizeof(uint32_t)));
         CUDA_CHK(cudaMalloc(&d_XXT_u4, tri_u32_bytes_u4));
-        CUDA_CHK(cudaMalloc(&d_distances_u4, tri_half_bytes_u4));
+        CUDA_CHK(cudaMalloc(&d_distances_u4, tri_float_bytes_u4));
 
         generate_genomic_matrix_packed_U4(h_matrix_u4, m, n);
         CUDA_CHK(cudaMemcpy(d_matrix_u4, h_matrix_u4, matrix_bytes_u4, cudaMemcpyHostToDevice));
@@ -824,7 +813,7 @@ int main(int argc, char *argv[]) {
             XXT_WMMA_Shared_U4<<<grid_syrk_u4, block_syrk_u4>>>(d_matrix_u4, d_XXT_u4, m, n);
 
             // 3. Calcular Matriz de Distancias de la sección
-            CUDA_CHK(cudaMemset(d_distances_u4, 0, tri_half_bytes_u4));
+            CUDA_CHK(cudaMemset(d_distances_u4, 0, tri_float_bytes_u4));
             dim3 block_dist_u4(16, 16);
             dim3 grid_dist_u4(div_up(m, block_dist_u4.x), div_up(m, block_dist_u4.y));
             CalculateDistanceU4<<<grid_dist_u4, block_dist_u4>>>(d_XXT_u4, d_norms_u4, d_distances_u4, m);
@@ -847,18 +836,18 @@ int main(int argc, char *argv[]) {
         int packed_cols_u2 = div_up(n, VALUES_PER_BYTE_U2);
         size_t matrix_bytes_u2 = (size_t)m * (size_t)packed_cols_u2 * sizeof(uint8_t);
         size_t tri_u32_bytes_u2 = tri_elems * sizeof(uint32_t);
-        size_t tri_half_bytes_u2 = tri_elems * sizeof(half);
+        size_t tri_float_bytes_u2 = tri_elems * sizeof(float);
 
         uint8_t *h_matrix_u2 = (uint8_t*)malloc(matrix_bytes_u2);
         uint8_t *d_matrix_u2 = NULL;
         uint32_t *d_norms_u2 = NULL;
         uint32_t *d_XXT_u2 = NULL;
-        half *d_distances_u2 = NULL; 
+        float *d_distances_u2 = NULL; 
 
         CUDA_CHK(cudaMalloc(&d_matrix_u2, matrix_bytes_u2));
         CUDA_CHK(cudaMalloc(&d_norms_u2, (size_t)m * sizeof(uint32_t)));
         CUDA_CHK(cudaMalloc(&d_XXT_u2, tri_u32_bytes_u2));
-        CUDA_CHK(cudaMalloc(&d_distances_u2, tri_half_bytes_u2));
+        CUDA_CHK(cudaMalloc(&d_distances_u2, tri_float_bytes_u2));
 
         generate_genomic_matrix_packed_U2(h_matrix_u2, m, n, packed_cols_u2);
         CUDA_CHK(cudaMemcpy(d_matrix_u2, h_matrix_u2, matrix_bytes_u2, cudaMemcpyHostToDevice));
@@ -876,7 +865,7 @@ int main(int argc, char *argv[]) {
             XXT_Manual_U2<<<grid_syrk_u2, block_syrk_u2>>>(d_matrix_u2, d_XXT_u2, m, packed_cols_u2);
 
             // 3. Calcular Matriz de Distancias de la sección
-            CUDA_CHK(cudaMemset(d_distances_u2, 0, tri_half_bytes_u2));
+            CUDA_CHK(cudaMemset(d_distances_u2, 0, tri_float_bytes_u2));
             dim3 block_dist_u2(16, 16);
             dim3 grid_dist_u2(div_up(m, block_dist_u2.x), div_up(m, block_dist_u2.y));
             CalculateDistanceU2<<<grid_dist_u2, block_dist_u2>>>(d_XXT_u2, d_norms_u2, d_distances_u2, m);

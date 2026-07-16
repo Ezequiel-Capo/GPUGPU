@@ -70,3 +70,32 @@ for prog in "${PROGRAMAS[@]}"; do
 
     echo
 done
+
+echo "============================================================"
+echo "Errores numéricos"
+echo "============================================================"
+
+if [[ -d "e_numerico" ]]; then
+    shopt -s nullglob
+
+    archivos=(e_numerico/*.out)
+
+    if (( ${#archivos[@]} == 0 )); then
+        echo "No existen archivos .out en e_numerico. Asegúrese de haber ejecutado error_numerico.sh. y esperar que finalicen los jobs."
+    else
+        for archivo in "${archivos[@]}"; do
+            echo
+            echo "---------------- $(basename "$archivo") ----------------"
+
+            if [[ ! -s "$archivo" ]]; then
+                echo "ERROR: El archivo está vacío."
+            else
+                cat "$archivo"
+            fi
+        done
+    fi
+
+    shopt -u nullglob
+else
+    echo "ERROR: No existe el directorio e_numerico."
+fi

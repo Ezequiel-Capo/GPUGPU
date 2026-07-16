@@ -33,7 +33,7 @@ case "$exe" in
         nvcc -O3 -arch=sm_75 -o "$run_exe" lab_wmma_u8.cu
         ;;
     "./error_numerico")
-        nvcc -O3 -arch=sm_75 -o "$run_exe" error_numerico.cu
+        nvcc -O3 -arch=sm_75 -o "$run_exe" error_numerico.cu -lcublas -lnvToolsExt
         ;;
     "./cublas")
         nvcc -O3 -arch=sm_75 -o "$run_exe" cublas.cu -lcublas -lnvToolsExt

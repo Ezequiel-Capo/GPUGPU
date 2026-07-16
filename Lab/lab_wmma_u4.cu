@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <math.h>
 #include <cuda_runtime.h>
-#include <cuda_fp16.h> // Incluido para el tipo half
 #include <mma.h>
 #include <nvtx3/nvToolsExt.h>
 
@@ -53,7 +52,7 @@ static __device__ __host__ inline size_t get_packed_index(size_t r, size_t c, si
 }
 
 // EUCLIDEAN DISTANCE CON RAIZ CUADRADA, FLOAT16 Y UNSIGNED INT
-__global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms, half *distances, size_t m) {
+__global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms, float *distances, size_t m) {
     size_t row = (size_t)blockIdx.y * blockDim.y + threadIdx.y;
     size_t col = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -71,8 +70,8 @@ __global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms, ha
             dist_f = sqrtf((float)(sum_norms - 2 * xxt));
         }
 
-        // Guardar resultado como float16 (half)
-        distances[idx] = __float2half(dist_f);
+        // Guardar resultado como float
+        distances[idx] = dist_f;
     }
 }
 
@@ -331,12 +330,12 @@ void print_matrix_packed_u32(const uint32_t *matrix, int m) {
     }
 }
 
-// NUEVO: Imprime reconstruyendo la matriz cuadrada desde el empaquetado half
-void print_matrix_packed_half(const half *matrix, int m) {
+// Imprime reconstruyendo la matriz cuadrada desde el vector de distancias
+void print_matrix_packed_float(const float *matrix, int m) {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < m; j++) {
             size_t idx = get_packed_index(i, j, m);
-            printf("%6.2f ", __half2float(matrix[idx]));
+            printf("%6.2f ", matrix[idx]);
         }
         printf("\n");
     }
@@ -378,19 +377,19 @@ int main(int argc, char *argv[]) {
     // 2. Memoria de la matriz de salida (Reduccion Triangulo Superior)
     size_t tri_elems = m * (m + 1) / 2;
     size_t tri_u32_bytes = tri_elems * sizeof(uint32_t);
-    size_t tri_half_bytes = tri_elems * sizeof(half); // Bytes para half
+    size_t tri_float_bytes = tri_elems * sizeof(float); // Bytes para float
 
     uint8_t *h_matrix = NULL;
 
     uint8_t *d_matrix = NULL;
     uint32_t *d_norms = NULL;
     uint32_t *d_XXT = NULL;
-    half *d_distances = NULL;
+    float *d_distances = NULL;
 
     CUDA_CHK(cudaMalloc(&d_matrix, matrix_bytes));
     CUDA_CHK(cudaMalloc(&d_norms, m * sizeof(uint32_t)));
     CUDA_CHK(cudaMalloc(&d_XXT, tri_u32_bytes));
-    CUDA_CHK(cudaMalloc(&d_distances, tri_half_bytes));
+    CUDA_CHK(cudaMalloc(&d_distances, tri_float_bytes));
 
     printf("Generando matriz genomica empaquetada X_int4 (%zu individuos x %zu SNPs)...\n", m, n);
 
@@ -433,7 +432,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
-    CUDA_CHK(cudaMemset(d_distances, 0, tri_half_bytes));
+    CUDA_CHK(cudaMemset(d_distances, 0, tri_float_bytes));
     printf("XXT con tensor cores finalizado\n");
 
     // DISTANCIAS EUCLIDEAS -----------------------------------------------------
@@ -462,7 +461,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        CUDA_CHK(cudaMemset(d_distances, 0, tri_half_bytes));
+        CUDA_CHK(cudaMemset(d_distances, 0, tri_float_bytes));
 
         // DISTANCIAS
         nvtxRangePushA("CalculateDistance");
@@ -486,12 +485,12 @@ int main(int argc, char *argv[]) {
         bool ok = validate_small_case(h_matrix, h_XXT, h_norms, m, n);
         printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
 
-        half *h_distances = (half*)malloc(tri_half_bytes);
+        float *h_distances = (float*)malloc(tri_float_bytes);
         fprintf(stderr, "\nDistancias euclideas (debug):\n");
-        CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_half_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_float_bytes, cudaMemcpyDeviceToHost));
         
-        // Usamos la nueva funcion de impresion adaptada para half
-        print_matrix_packed_half(h_distances, m);
+        // Usamos la nueva funcion de impresion adaptada para float
+        print_matrix_packed_float(h_distances, m);
 
         free(h_norms);
         free(h_XXT);

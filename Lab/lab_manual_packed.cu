@@ -4,7 +4,6 @@
 #include <string.h>
 #include <math.h>
 #include <cuda_runtime.h>
-#include <cuda_fp16.h> // Incluido para el tipo half
 #include <nvtx3/nvToolsExt.h>
 
 // Convencion de dimensiones:
@@ -130,7 +129,7 @@ __host__ __device__ static inline uint32_t unpack_2bit_to_4x8(uint8_t packed_byt
 
 // EUCLIDEAN DISTANCE (Float16 y Raíz Cuadrada)
 __global__ void CalculateDistance(const uint32_t *XXT_packed, const uint32_t *norms,
-                                  half *distances_packed, int m) {
+                                  float *distances_packed, int m) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -147,7 +146,7 @@ __global__ void CalculateDistance(const uint32_t *XXT_packed, const uint32_t *no
             dist_f = sqrtf((float)(sum_norms - 2 * xxt));
         }
 
-        distances_packed[idx] = __float2half(dist_f);
+        distances_packed[idx] = dist_f;
     }
 }
 
@@ -287,12 +286,12 @@ bool validate_small_case_packed(const uint8_t *X, const uint32_t *XXT_packed, co
     return true;
 }
 
-// Reconstruye visualmente en float desde el arreglo comprimido half
-void print_matrix_half(const half *matrix_packed, int m) {
+// Reconstruye visualmente en float desde el arreglo de distancias
+void print_matrix_float(const float *matrix_packed, int m) {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < m; j++) {
             size_t idx = get_triangular_index(i, j, m);
-            printf("%6.2f ", __half2float(matrix_packed[idx]));
+            printf("%6.2f ", matrix_packed[idx]);
         }
         printf("\n");
     }
@@ -320,19 +319,19 @@ int main(int argc, char *argv[]) {
     // Tamaños comprimidos m x (m+1)/2 en vez de m x m
     size_t triangular_elems = (size_t)m * (m + 1) / 2;
     size_t tri_u32_bytes = triangular_elems * sizeof(uint32_t);
-    size_t tri_half_bytes = triangular_elems * sizeof(half);
+    size_t tri_float_bytes = triangular_elems * sizeof(float);
 
     uint8_t *h_matrix = NULL;
 
     uint8_t *d_matrix = NULL;
     uint32_t *d_norms = NULL;
     uint32_t *d_XXT_packed = NULL;
-    half *d_distances_packed = NULL;
+    float *d_distances_packed = NULL;
 
     CUDA_CHK(cudaMalloc(&d_matrix, packed_matrix_bytes));
     CUDA_CHK(cudaMalloc(&d_norms, (size_t)m * sizeof(uint32_t)));
     CUDA_CHK(cudaMalloc(&d_XXT_packed, tri_u32_bytes));
-    CUDA_CHK(cudaMalloc(&d_distances_packed, tri_half_bytes));
+    CUDA_CHK(cudaMalloc(&d_distances_packed, tri_float_bytes));
 
     printf("Generando matriz genomica X (%d individuos x %d SNPs)...\n", m, n);
     printf("Matriz X empaquetada: %zu bytes (sin empaquetar: %zu bytes).\n", packed_matrix_bytes, unpacked_matrix_bytes);
@@ -382,7 +381,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
         
-        CUDA_CHK(cudaMemset(d_distances_packed, 0, tri_half_bytes));
+        CUDA_CHK(cudaMemset(d_distances_packed, 0, tri_float_bytes));
 
         dim3 block_dist(16, 16);
         dim3 grid_dist(div_up(m, block_dist.x), div_up(m, block_dist.y));
@@ -409,12 +408,12 @@ int main(int argc, char *argv[]) {
         bool ok = validate_small_case_packed(h_matrix, h_XXT_packed, h_norms, m, n, packed_cols);
         printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
 
-        half *h_distances = (half*)malloc(tri_half_bytes);
+        float *h_distances = (float*)malloc(tri_float_bytes);
         if (h_distances) {
             printf("\nDistancias euclideas (debug):\n");
-            CUDA_CHK(cudaMemcpy(h_distances, d_distances_packed, tri_half_bytes, cudaMemcpyDeviceToHost));
-            // Muestra en pantalla el MxM completo leyendo desde el vector Half
-            print_matrix_half(h_distances, m);
+            CUDA_CHK(cudaMemcpy(h_distances, d_distances_packed, tri_float_bytes, cudaMemcpyDeviceToHost));
+            // Muestra en pantalla el MxM completo leyendo desde el vector float
+            print_matrix_float(h_distances, m);
             free(h_distances);
         }
         free(h_norms);

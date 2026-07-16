@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <math.h>
 #include <cuda_runtime.h>
-#include <cuda_fp16.h>
 #include <mma.h>
 #include <nvtx3/nvToolsExt.h>
 
@@ -29,7 +28,7 @@ static __device__ __host__ inline size_t get_packed_index(size_t r, size_t c, si
 
 // DISTANCIAS EUCLIDEAS CON INPUTS UNSIGNED INT
 __global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms,
-                                  half *distances, size_t m) {
+                                  float *distances, size_t m) {
     size_t row = (size_t)blockIdx.y * blockDim.y + threadIdx.y;
     size_t col = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -46,7 +45,7 @@ __global__ void CalculateDistance(const uint32_t *XXT, const uint32_t *norms,
             dist_f = sqrtf((float)(sum_norms - 2 * xxt));
         }
         
-        distances[packed_idx] = __float2half(dist_f);
+        distances[packed_idx] = dist_f;
     }
 }
 
@@ -157,7 +156,7 @@ void launch_XXT(const uint8_t* d_matrix, uint32_t* d_XXT, size_t m, size_t n) {
     XXT_WMMA_Shared<WTM, WTN, WM, WN, WK><<<grid_syrk, block_syrk>>>(d_matrix, d_XXT, m, n);
 }
 
-// Despachador en tiempo de ejecución (Runtime Dispatcher)
+// Despachador en tiempo de ejecución 
 void dispatch_XXT(const uint8_t* d_matrix, uint32_t* d_XXT, size_t m, size_t n, 
                   int wtm, int wtn, int wm, int wn, int wk) {
     // Configuraciones 2x2
@@ -245,17 +244,17 @@ void generate_genomic_matrix_device(uint8_t *d_matrix, size_t m, size_t n) {
     CUDA_CHK(cudaGetLastError());
 }
 
-void print_packed_matrix_half(const half *matrix, int m) {
+void print_packed_matrix_float(const float *matrix, int m) {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < m; j++) {
             size_t packed_idx = (i <= j) ? get_packed_index(i, j, m) : get_packed_index(j, i, m);
-            printf("%6.2f ", __half2float(matrix[packed_idx]));
+            printf("%6.2f ", matrix[packed_idx]);
         }
         printf("\n");
     }
 }
-void print_matrix_packed_half(const half *matrix, int m) {
-    print_packed_matrix_half(matrix, m);
+void print_matrix_packed_float(const float *matrix, int m) {
+    print_packed_matrix_float(matrix, m);
 }
 
 void print_matrix_u8(const uint8_t *matrix, int rows, int cols) {
@@ -329,18 +328,18 @@ int main(int argc, char *argv[]) {
     size_t matrix_bytes = matrix_elems * sizeof(uint8_t);
     size_t tri_elems = m * (m + 1) / 2;
     size_t tri_u32_bytes = tri_elems * sizeof(uint32_t); 
-    size_t tri_half_bytes = tri_elems * sizeof(half);
+    size_t tri_float_bytes = tri_elems * sizeof(float);
 
     uint8_t *h_matrix = NULL;
     uint8_t *d_matrix = NULL;
     uint32_t *d_norms = NULL;      
     uint32_t *d_XXT = NULL;        
-    half *d_distances = NULL; 
+    float *d_distances = NULL; 
 
     CUDA_CHK(cudaMalloc(&d_matrix, matrix_bytes));
     CUDA_CHK(cudaMalloc(&d_norms, m * sizeof(uint32_t)));
     CUDA_CHK(cudaMalloc(&d_XXT, tri_u32_bytes));
-    CUDA_CHK(cudaMalloc(&d_distances, tri_half_bytes));
+    CUDA_CHK(cudaMalloc(&d_distances, tri_float_bytes));
 
     printf("Generando matriz genomica X (%zu individuos x %zu SNPs)...\n", m, n);
 
@@ -379,7 +378,7 @@ int main(int argc, char *argv[]) {
     CUDA_CHK(cudaGetLastError());
     CUDA_CHK(cudaDeviceSynchronize());
 
-    CUDA_CHK(cudaMemset(d_distances, 0, tri_half_bytes)); 
+    CUDA_CHK(cudaMemset(d_distances, 0, tri_float_bytes)); 
     printf("SYRK con tensor cores finalizado\n");
 
     // DISTANCIAS
@@ -405,7 +404,7 @@ int main(int argc, char *argv[]) {
         CUDA_CHK(cudaDeviceSynchronize());
         nvtxRangePop();
 
-        CUDA_CHK(cudaMemset(d_distances, 0, tri_half_bytes));
+        CUDA_CHK(cudaMemset(d_distances, 0, tri_float_bytes));
         
         nvtxRangePushA("CalculateDistance");
         CalculateDistance<<<grid_dist, block_dist>>>(d_XXT, d_norms, d_distances, m);
@@ -417,12 +416,12 @@ int main(int argc, char *argv[]) {
     if (m <= 64 && n <= 1024 && h_matrix) {
         uint32_t *h_norms = (uint32_t*)malloc((size_t)m * sizeof(uint32_t));
         uint32_t *h_XXT = (uint32_t*)malloc(tri_u32_bytes);
-        half *h_distances = (half*)malloc(tri_half_bytes);
+        float *h_distances = (float*)malloc(tri_float_bytes);
         
         if (h_norms && h_XXT && h_distances) {
             CUDA_CHK(cudaMemcpy(h_norms, d_norms, (size_t)m * sizeof(uint32_t), cudaMemcpyDeviceToHost));
             CUDA_CHK(cudaMemcpy(h_XXT, d_XXT, tri_u32_bytes, cudaMemcpyDeviceToHost)); 
-            CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_half_bytes, cudaMemcpyDeviceToHost));
+            CUDA_CHK(cudaMemcpy(h_distances, d_distances, tri_float_bytes, cudaMemcpyDeviceToHost));
             
             printf("Normas (debug):\n");
             for (size_t i = 0; i < m; i++) printf("%u ", h_norms[i]);
@@ -432,7 +431,7 @@ int main(int argc, char *argv[]) {
             printf("Validacion CPU/GPU: %s\n", ok ? "OK" : "FALLO");
 
             fprintf(stderr, "\nDistancias euclideas (debug):\n");
-            print_matrix_packed_half(h_distances, (int)m);
+            print_matrix_packed_float(h_distances, (int)m);
         }
         
         if (h_norms) free(h_norms);
