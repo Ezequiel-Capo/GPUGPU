@@ -58,10 +58,13 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, size_t m, size_t 
     constexpr int WARP_SIZE = 32;
     constexpr int TILE_M = WARP_TILE_M * WMMA_M;
     constexpr int TILE_N = WARP_TILE_N * WMMA_N;
+    
     constexpr int SHMEM_K = 32;
+    constexpr int PAD_K = 16;  // Padding múltiplo de 16 bytes
+    constexpr int STRIDE_K = SHMEM_K + PAD_K; // Stride total de 48 bytes
+    
     constexpr int SHMEM_C_N = TILE_N + 8;
 
-    // Evaluaciones en tiempo de compilación para seguridad
     static_assert(WARP_TILE_M >= 1 && WARP_TILE_N >= 1, "WARP_TILE_M y N deben ser al menos 1.");
     static_assert((WARP_TILE_M * WARP_TILE_N * WARP_SIZE) <= 1024, "Demasiados warps por bloque.");
     static_assert(SHMEM_K >= WMMA_K, "SHMEM_K debe ser al menos WMMA_K.");
@@ -82,8 +85,9 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, size_t m, size_t 
     bool compute_subtile = (subtile_col + WMMA_N > subtile_row);
     size_t n_size = n;
 
-    __shared__ __align__(32) uint8_t a_tile[TILE_M][SHMEM_K];
-    __shared__ __align__(32) uint8_t b_tile[TILE_N][SHMEM_K];
+    // Declaramos la memoria con el STRIDE_K
+    __shared__ __align__(32) uint8_t a_tile[TILE_M][STRIDE_K];
+    __shared__ __align__(32) uint8_t b_tile[TILE_N][STRIDE_K];
     __shared__ __align__(32) int32_t c_tile[TILE_M][SHMEM_C_N];
 
     wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, unsigned char, wmma::row_major> a_frag;
@@ -117,8 +121,9 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, size_t m, size_t 
             const uint8_t *a_ptr = &a_tile[warp_tile_row * WMMA_M][0];
             const uint8_t *b_ptr = &b_tile[warp_tile_col * WMMA_N][0];
 
-            wmma::load_matrix_sync(a_frag, a_ptr, SHMEM_K);
-            wmma::load_matrix_sync(b_frag, b_ptr, SHMEM_K);
+            // Pasamos el STRIDE_K real a la API para que sepa los saltos en memoria
+            wmma::load_matrix_sync(a_frag, a_ptr, STRIDE_K);
+            wmma::load_matrix_sync(b_frag, b_ptr, STRIDE_K);
             wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
         __syncthreads();
@@ -144,7 +149,6 @@ __global__ void XXT_WMMA_Shared(const uint8_t *X, uint32_t *C, size_t m, size_t 
         }
     }
 }
-
 // Wrapper para lanzar el grid/block correcto dependiendo de los templates instanciados
 template <int WTM, int WTN, int WM, int WN, int WK>
 void launch_XXT(const uint8_t* d_matrix, uint32_t* d_XXT, size_t m, size_t n) {
