@@ -25,6 +25,7 @@ using namespace nvcuda;
 #define SHMEM_STRIDE_ELEMENTS (SHMEM_STRIDE_BYTES * 2) 
 
 #define SHMEM_C_N (TILE_N + 8)
+#define GENOMIC_MATRIX_SEED 42u
 
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 
@@ -255,7 +256,7 @@ __global__ void GenerateGenomicMatrixPackedKernelU4(uint8_t *matrix, int m, int 
     int col1 = col0 + 1;
 
     uint32_t k0 = seed ^ ((uint32_t)row * 0x9e3779b9u) ^ ((uint32_t)col0 * 0x85ebca6bu);
-    uint32_t k1 = seed ^ ((uint32_t)row * 0xc2b2ae35u) ^ ((uint32_t)col1 * 0x27d4eb2fu);
+    uint32_t k1 = seed ^ ((uint32_t)row * 0x9e3779b9u) ^ ((uint32_t)col1 * 0x85ebca6bu);
 
     uint8_t v0 = (uint8_t)(hash_u32(k0) % 3u);
     uint8_t v1 = (uint8_t)(hash_u32(k1) % 3u);
@@ -268,7 +269,7 @@ void generate_genomic_matrix_packed_device(uint8_t *d_matrix, size_t m, size_t n
     dim3 block(32, 8);
     dim3 grid((unsigned)div_up_size(n_bytes, (size_t)block.x), (unsigned)div_up_size(m, (size_t)block.y));
 
-    GenerateGenomicMatrixPackedKernelU4<<<grid, block>>>(d_matrix, m, n_bytes, 42u);
+    GenerateGenomicMatrixPackedKernelU4<<<grid, block>>>(d_matrix, m, n_bytes, GENOMIC_MATRIX_SEED);
     CUDA_CHK(cudaGetLastError());
 }
 

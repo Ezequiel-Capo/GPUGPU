@@ -9,6 +9,7 @@
 // ====================================================================================
 // MACROS Y FUNCIONES AUXILIARES
 // ====================================================================================
+#define GENOMIC_MATRIX_SEED 42u
 #define CUDA_CHK(ans) do { gpuAssert((ans), __FILE__, __LINE__); } while (0)
 
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true) {
@@ -102,7 +103,7 @@ __global__ void GenerateGenomicMatrixKernelU8(uint8_t *matrix, size_t m, size_t 
 void generate_genomic_matrix_device(uint8_t *d_matrix, size_t m, size_t n) {
     dim3 block(32, 8);
     dim3 grid((unsigned)div_up_size(n, (size_t)block.x), (unsigned)div_up_size(m, (size_t)block.y));
-    GenerateGenomicMatrixKernelU8<<<grid, block>>>(d_matrix, m, n, 42u);
+    GenerateGenomicMatrixKernelU8<<<grid, block>>>(d_matrix, m, n, GENOMIC_MATRIX_SEED);
     CUDA_CHK(cudaGetLastError());
 }
 

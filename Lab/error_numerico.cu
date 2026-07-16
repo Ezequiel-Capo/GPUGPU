@@ -646,11 +646,17 @@ void generate_genomic_matrix_packed_U2(uint8_t *matrix, int m, int n, int packed
 int main(int argc, char *argv[]) {
     int m = (1 << 10);  
     int n = (1 << 15);  
-    int count = 11;
+    int count = 1;
+
+
     if (argc >= 3) {
         m = atoi(argv[1]);
         n = atoi(argv[2]);
     }
+    
+    printf("===========================\n");
+
+    printf("\nTamaño X: m=%d, n=%d\n", m, n);
     
     if (m <= 0 || n <= 0 || n % 32 != 0) {
         fprintf(stderr, "Uso: %s [individuos m] [SNPs n (multiplo de 32)]\n", argv[0]);
@@ -718,6 +724,7 @@ int main(int argc, char *argv[]) {
         }
         
         printf("[cuBLAS] Referencia D (float32, Ssyrk) calculada.\n");
+
 
         cudaFree(d_matrix_ref);
         cudaFree(d_Xf);
