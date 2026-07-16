@@ -6,13 +6,15 @@ PROGRAMAS=(
     "lab_manual_packed"
     "lab_wmma_u4"
     "lab_wmma_u8"
+    "cublas"
 )
 
 CASOS=(
-    "1024 32768"
-    "1024 262144"
-    "1024 524288"
-    "1024 1048576"
+    "1024 524288"  # 2^10x2^19= 512MiB
+    "1024 1048576" # 2^10x2^20= 1GiB
+    "2048 1048576" # 2^11x2^20= 2GiB
+    "4096 1048576" # 2^12x2^20= 4GiB
+    "8192 1048576" # 2^13x2^20= 8GiB
 )
 
 for prog in "${PROGRAMAS[@]}"; do
@@ -45,7 +47,7 @@ for prog in "${PROGRAMAS[@]}"; do
             }
 
             header && /PushPop/ {
-                if ($NF ~ /:(XXT|Norms|CalculateDistance)$/)
+                if ($NF ~ /:(XXT|Norms|CalculateDistance|GenX)$/)
                     print
             }
             ' "$archivo"
@@ -68,3 +70,32 @@ for prog in "${PROGRAMAS[@]}"; do
 
     echo
 done
+
+echo "============================================================"
+echo "Errores numéricos"
+echo "============================================================"
+
+if [[ -d "e_numerico" ]]; then
+    shopt -s nullglob
+
+    archivos=(e_numerico/*.out)
+
+    if (( ${#archivos[@]} == 0 )); then
+        echo "No existen archivos .out en e_numerico. Asegúrese de haber ejecutado error_numerico.sh. y esperar que finalicen los jobs."
+    else
+        for archivo in "${archivos[@]}"; do
+            echo
+            echo "---------------- $(basename "$archivo") ----------------"
+
+            if [[ ! -s "$archivo" ]]; then
+                echo "ERROR: El archivo está vacío."
+            else
+                cat "$archivo"
+            fi
+        done
+    fi
+
+    shopt -u nullglob
+else
+    echo "ERROR: No existe el directorio e_numerico."
+fi
